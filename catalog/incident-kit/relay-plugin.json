@@ -1,0 +1,6 @@
+{
+  "id": "incident-kit",
+  "name": "Incident kit",
+  "version": "1.0.0",
+  "description": "Commands for incident briefs and postmortems."
+}

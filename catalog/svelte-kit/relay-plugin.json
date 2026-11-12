@@ -1,0 +1,6 @@
+{
+  "id": "svelte-kit",
+  "name": "Svelte kit",
+  "version": "1.0.0",
+  "description": "Commands for Svelte components and stores."
+}

@@ -1,0 +1,6 @@
+{
+  "id": "etl-kit",
+  "name": "ETL kit",
+  "version": "1.0.0",
+  "description": "Commands for pipeline design and data quality checks."
+}

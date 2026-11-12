@@ -1,0 +1,6 @@
+{
+  "id": "css-kit",
+  "name": "CSS kit",
+  "version": "1.0.0",
+  "description": "Commands for auditing styles and building layouts."
+}

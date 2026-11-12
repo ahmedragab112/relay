@@ -1,0 +1,6 @@
+{
+  "id": "review-ops",
+  "name": "Review ops",
+  "version": "1.0.0",
+  "description": "Commands for review process and load."
+}

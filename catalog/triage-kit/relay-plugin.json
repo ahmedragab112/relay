@@ -1,0 +1,6 @@
+{
+  "id": "triage-kit",
+  "name": "Triage kit",
+  "version": "1.0.0",
+  "description": "Commands for issue triage and bug reports."
+}

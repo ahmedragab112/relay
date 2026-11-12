@@ -1,0 +1,6 @@
+{
+  "id": "sre-kit",
+  "name": "SRE kit",
+  "version": "1.0.0",
+  "description": "Commands for SLOs and runbooks."
+}

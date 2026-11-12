@@ -1,0 +1,6 @@
+{
+  "id": "grpc-kit",
+  "name": "gRPC kit",
+  "version": "1.0.0",
+  "description": "Commands for protobuf design and service review."
+}

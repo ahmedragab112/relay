@@ -1,0 +1,6 @@
+{
+  "id": "offline-kit",
+  "name": "Offline kit",
+  "version": "1.0.0",
+  "description": "Commands for offline-first data and sync."
+}

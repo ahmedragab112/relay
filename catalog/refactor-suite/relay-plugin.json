@@ -1,0 +1,6 @@
+{
+  "id": "refactor-suite",
+  "name": "Refactor suite",
+  "version": "1.0.0",
+  "description": "Commands for restructuring code without changing behavior."
+}

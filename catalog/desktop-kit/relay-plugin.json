@@ -1,0 +1,6 @@
+{
+  "id": "desktop-kit",
+  "name": "Desktop kit",
+  "version": "1.0.0",
+  "description": "Commands for native menus, shortcuts, and windows."
+}

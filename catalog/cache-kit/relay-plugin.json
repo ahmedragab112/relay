@@ -1,0 +1,6 @@
+{
+  "id": "cache-kit",
+  "name": "Cache kit",
+  "version": "1.0.0",
+  "description": "Commands for cache planning and invalidation."
+}

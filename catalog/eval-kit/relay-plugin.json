@@ -1,0 +1,6 @@
+{
+  "id": "eval-kit",
+  "name": "Eval kit",
+  "version": "1.0.0",
+  "description": "Commands for LLM evaluation sets and scoring."
+}

@@ -1,0 +1,6 @@
+{
+  "id": "pandas-kit",
+  "name": "pandas kit",
+  "version": "1.0.0",
+  "description": "Commands for dataframe cleaning and analysis."
+}

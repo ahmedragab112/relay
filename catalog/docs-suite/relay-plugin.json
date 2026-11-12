@@ -1,0 +1,6 @@
+{
+  "id": "docs-suite",
+  "name": "Docs suite",
+  "version": "1.0.0",
+  "description": "Commands for documenting code and writing a project README."
+}

@@ -1,0 +1,6 @@
+{
+  "id": "performance-suite",
+  "name": "Performance suite",
+  "version": "1.0.0",
+  "description": "Commands for profiling plans and targeted optimization."
+}

@@ -1,0 +1,6 @@
+{
+  "id": "secrets-kit",
+  "name": "Secrets kit",
+  "version": "1.0.0",
+  "description": "Commands for secret storage and rotation."
+}

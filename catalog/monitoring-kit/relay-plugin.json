@@ -1,0 +1,6 @@
+{
+  "id": "monitoring-kit",
+  "name": "Monitoring kit",
+  "version": "1.0.0",
+  "description": "Commands for alerts and dashboards."
+}

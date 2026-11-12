@@ -1,0 +1,6 @@
+{
+  "id": "notebook-kit",
+  "name": "Notebook kit",
+  "version": "1.0.0",
+  "description": "Commands for analysis notebooks and reproducibility."
+}

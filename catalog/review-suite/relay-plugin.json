@@ -1,0 +1,6 @@
+{
+  "id": "review-suite",
+  "name": "Review suite",
+  "version": "1.0.0",
+  "description": "Slash commands for reviewing changes and whole files before they merge."
+}

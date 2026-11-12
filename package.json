@@ -1,0 +1,124 @@
+{
+  "name": "relay-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A local-first coding agent workspace",
+  "author": "Relay",
+  "homepage": "https://example.com/relay",
+  "desktopName": "relay.desktop",
+  "main": "dist/main/index.cjs",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "build": "node scripts/build.mjs",
+    "start": "electron .",
+    "icons": "node scripts/icons.mjs",
+    "test": "tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "test:desktop": "npm run build && node tests/desktop.mjs",
+    "test:packaged": "npm run package:host && RELAY_EXECUTABLE=\"$PWD/release/mac/Relay.app/Contents/MacOS/Relay\" node tests/desktop.mjs",
+    "package:arm64": "RELAY_TARGET_ARCH=arm64 npm run build && electron-builder --mac dir --arm64",
+    "package:host": "RELAY_TARGET_ARCH=x64 npm run build && electron-builder --mac dir --x64",
+    "package:linux": "RELAY_TARGET_PLATFORM=linux RELAY_TARGET_ARCH=x64 npm run build && electron-builder --linux AppImage deb --x64 && RELAY_TARGET_PLATFORM=linux RELAY_TARGET_ARCH=arm64 npm run build && electron-builder --linux AppImage deb --arm64",
+    "package:win": "RELAY_TARGET_PLATFORM=win32 RELAY_TARGET_ARCH=x64 npm run build && electron-builder --win nsis portable --x64"
+  },
+  "dependencies": {
+    "@opencode/client": "2.2.6",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/xterm": "6.0.0",
+    "dompurify": "3.4.17",
+    "fflate": "0.8.3",
+    "marked": "18.2.0",
+    "monaco-editor": "0.57.0"
+  },
+  "devDependencies": {
+    "@opencode/cli": "2.2.6",
+    "@types/node": "^24.0.0",
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2",
+    "playwright": "1.65.0",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vite": "8.3.7"
+  },
+  "build": {
+    "appId": "app.relay.workspace",
+    "productName": "Relay",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/engine",
+        "to": "opencode"
+      },
+      {
+        "from": "catalog",
+        "to": "catalog"
+      },
+      {
+        "from": "bundled-skills",
+        "to": "bundled-skills"
+      }
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "identity": "-",
+      "icon": "build/icon.icns",
+      "minimumSystemVersion": "13.0.0",
+      "hardenedRuntime": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Relay uses the microphone only while you record a voice dictation."
+      },
+      "target": [
+        "dir"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        },
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "${productName}-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-Portable-${version}-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Development",
+      "maintainer": "Relay <relay@localhost>",
+      "executableName": "relay",
+      "syncDesktopName": true,
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": ["x64", "arm64"]
+        },
+        {
+          "target": "deb",
+          "arch": ["x64", "arm64"]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
+  }
+}

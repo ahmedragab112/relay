@@ -1,0 +1,6 @@
+{
+  "id": "audit-kit",
+  "name": "Audit kit",
+  "version": "1.0.0",
+  "description": "Commands for security reviews of code and access."
+}

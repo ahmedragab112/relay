@@ -1,0 +1,6 @@
+{
+  "id": "automation-kit",
+  "name": "Automation kit",
+  "version": "1.0.0",
+  "description": "Commands for scripts and scheduled jobs."
+}

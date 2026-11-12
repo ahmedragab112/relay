@@ -1,0 +1,6 @@
+{
+  "id": "dependency-kit",
+  "name": "Dependency kit",
+  "version": "1.0.0",
+  "description": "Commands for dependency review and upgrades."
+}

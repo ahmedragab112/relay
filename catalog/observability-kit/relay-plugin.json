@@ -1,0 +1,6 @@
+{
+  "id": "observability-kit",
+  "name": "Observability kit",
+  "version": "1.0.0",
+  "description": "Commands for instrumentation and dashboards."
+}

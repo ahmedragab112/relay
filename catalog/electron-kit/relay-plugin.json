@@ -1,0 +1,6 @@
+{
+  "id": "electron-kit",
+  "name": "Electron kit",
+  "version": "1.0.0",
+  "description": "Commands for desktop app architecture and security."
+}

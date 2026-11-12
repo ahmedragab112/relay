@@ -1,0 +1,6 @@
+{
+  "id": "release-suite",
+  "name": "Release suite",
+  "version": "1.0.0",
+  "description": "Commands for release notes and pre-release checks."
+}

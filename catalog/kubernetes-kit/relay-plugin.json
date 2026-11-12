@@ -1,0 +1,6 @@
+{
+  "id": "kubernetes-kit",
+  "name": "Kubernetes kit",
+  "version": "1.0.0",
+  "description": "Commands for manifests and workload review."
+}

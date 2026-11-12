@@ -1,0 +1,6 @@
+{
+  "id": "backup-kit",
+  "name": "Backup kit",
+  "version": "1.0.0",
+  "description": "Commands for backup and restore plans."
+}

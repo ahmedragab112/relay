@@ -1,0 +1,6 @@
+{
+  "id": "queue-kit",
+  "name": "Queue kit",
+  "version": "1.0.0",
+  "description": "Commands for job design and retry policy."
+}

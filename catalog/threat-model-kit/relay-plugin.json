@@ -1,0 +1,6 @@
+{
+  "id": "threat-model-kit",
+  "name": "Threat model kit",
+  "version": "1.0.0",
+  "description": "Commands for threat modeling systems."
+}

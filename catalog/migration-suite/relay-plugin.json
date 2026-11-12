@@ -1,0 +1,6 @@
+{
+  "id": "migration-suite",
+  "name": "Migration suite",
+  "version": "1.0.0",
+  "description": "Commands for planning migrations and safe mechanical rewrites."
+}

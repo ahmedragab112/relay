@@ -1,0 +1,6 @@
+{
+  "id": "nginx-kit",
+  "name": "Nginx kit",
+  "version": "1.0.0",
+  "description": "Commands for proxy configuration and TLS checks."
+}

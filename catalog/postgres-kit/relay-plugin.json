@@ -1,0 +1,6 @@
+{
+  "id": "postgres-kit",
+  "name": "Postgres kit",
+  "version": "1.0.0",
+  "description": "Commands for query review and index planning."
+}

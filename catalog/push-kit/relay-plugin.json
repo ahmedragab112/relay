@@ -1,0 +1,6 @@
+{
+  "id": "push-kit",
+  "name": "Push kit",
+  "version": "1.0.0",
+  "description": "Commands for notifications and delivery."
+}

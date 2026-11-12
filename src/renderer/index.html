@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; font-src 'self' data:; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark light">
+  <title>Relay</title>
+</head>
+<body>
+  <main class="workspace" id="app">
+    <header class="titlebar">
+      <button id="sidebar-button" class="icon-button sidebar-toggle" aria-label="Toggle sidebar" aria-pressed="true" title="Show or hide the sidebar">
+        <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
+      </button>
+      <span class="brand"><span class="brand-mark" aria-hidden="true">↳</span> relay</span>
+      <span class="title-divider"></span>
+      <button id="workspace-button" class="workspace-button" title="Open or switch project">Open project</button>
+      <span class="grow"></span>
+      <button id="palette-button" class="search-button">Search tasks or commands <kbd data-shortcut="Mod+K">⌘ K</kbd></button>
+      <span class="grow"></span>
+      <button id="terminal-button" class="icon-button" aria-label="Open terminal" title="Open terminal">&gt;_</button>
+      <button id="inspector-button" class="icon-button" aria-label="Toggle file inspector" aria-pressed="true" title="File inspector">▥</button>
+      <div class="window-controls" role="group" aria-label="Window controls">
+        <button id="window-minimize" aria-label="Minimize window" title="Minimize"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+        <button id="window-zoom" aria-label="Maximize window" title="Maximize"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
+        <button id="window-close" aria-label="Close window" title="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17"/></svg></button>
+      </div>
+    </header>
+    <aside class="sidebar" aria-label="Tasks and tools">
+      <button id="new-task" class="new-task" disabled><span>＋</span> New task <kbd data-shortcut="Mod+N">⌘ N</kbd></button>
+      <nav aria-label="Workspace tools">
+        <button id="open-project" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h3.6l1.8 2h7.6a2 2 0 0 1 2 2v7.5a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><path d="M12 11.5v4"/><path d="M10 13.5h4"/></svg></span><span class="nav-label">Open project</span></button>
+        <button id="attention-button" class="nav-button" aria-pressed="false" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 15.5V11a6 6 0 1 0-12 0v4.5l-1.5 2h15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg></span><span class="nav-label">Attention</span><span id="attention-count" class="attention-count" hidden>0</span></button>
+        <button id="agents-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3"/><path d="M3.5 19a5.5 5.5 0 0 1 11 0"/><path d="M16 6.2a3 3 0 0 1 0 5.6"/><path d="M17.5 14.4A5.5 5.5 0 0 1 20.5 19"/></svg></span><span class="nav-label">Agents</span></button>
+        <button id="automation-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9A8 8 0 0 1 18 6.6l2 2.4"/><path d="M20 4.6V9h-4.4"/><path d="M19.5 15A8 8 0 0 1 6 17.4L4 15"/><path d="M4 19.4V15h4.4"/></svg></span><span class="nav-label">Automation</span></button>
+      </nav>
+      <div class="section-label">RECENT TASKS <button id="refresh-tasks" class="icon-button" aria-label="Refresh tasks">↻</button></div>
+      <div id="task-list" class="task-list"><p class="small muted">Loading workspace…</p></div>
+      <div class="sidebar-bottom">
+        <div class="section-label">YOUR TOOLKIT</div>
+        <button id="tools-button" class="nav-button" aria-pressed="false"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="6.8" height="6.8" rx="1.7"/><rect x="13.2" y="4" width="6.8" height="6.8" rx="1.7"/><rect x="4" y="13.2" width="6.8" height="6.8" rx="1.7"/><rect x="13.2" y="13.2" width="6.8" height="6.8" rx="1.7"/></svg></span><span class="nav-label">Toolkit</span></button>
+        <button id="settings-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 8h9"/><path d="M17 8h2.5"/><circle cx="15" cy="8" r="2"/><path d="M4.5 16h2.5"/><path d="M10.5 16h9"/><circle cx="8.5" cy="16" r="2"/></svg></span><span class="nav-label">Settings</span><kbd data-shortcut="Mod+,">⌘ ,</kbd></button>
+        <div class="local-badge">Local OpenCode engine</div>
+      </div>
+    </aside>
+    <section class="chat" aria-label="Agent conversation">
+      <header class="chat-header"><h1 id="task-title">Your workspace</h1><span class="grow"></span><button id="usage-meter" class="usage-meter" title="Context usage" aria-label="Context usage" hidden><svg viewBox="0 0 24 24" aria-hidden="true"><circle class="usage-track" cx="12" cy="12" r="9"></circle><circle id="usage-fill" class="usage-fill" cx="12" cy="12" r="9"></circle></svg><span id="usage-percent">0%</span></button><span id="task-status" class="pill">No task selected</span><button id="task-menu" class="icon-button" aria-label="Rename or delete task" disabled>···</button></header>
+      <div class="conversation-wrap">
+        <div id="branch-bar" class="branch-bar" role="navigation" aria-label="Task branches" hidden></div>
+        <div id="conversation" class="conversation" tabindex="0" aria-label="Conversation history"><div class="empty-state"><h2>A calmer place to build.</h2><p>Loading your local workspace…</p></div></div>
+        <button id="scroll-bottom" class="scroll-bottom" type="button" title="Scroll to latest message" aria-label="Scroll to latest message" hidden><svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg></button>
+      </div>
+      <div id="requests" class="requests" aria-label="Agent requests"></div>
+      <div id="thinking" class="thinking" role="status" aria-live="polite" aria-atomic="true" title="Relay is working. You can keep typing; long builds and downloads can keep running in the background." hidden>
+        <span class="thinking-orbit" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span id="thinking-label" class="thinking-label">Thinking…</span>
+        <span id="thinking-elapsed" class="thinking-elapsed" aria-hidden="true"></span>
+      </div>
+      <div class="composer-wrap">
+        <button type="button" id="review-card" class="review-card" hidden></button>
+        <div id="command-menu" class="command-menu" role="listbox" aria-label="Slash commands" hidden></div>
+        <div id="queued-messages" class="queued-messages" aria-label="Queued messages" aria-live="polite"></div>
+        <div id="mode-chips" class="attachments"></div>
+        <div id="command-chips" class="attachments"></div>
+        <div id="attachments" class="attachments"></div>
+        <div id="skill-chips" class="attachments"></div>
+        <div id="agent-chips" class="attachments"></div>
+        <div id="context-chips" class="attachments"></div>
+        <div id="skill-suggestions" class="skill-suggestions" aria-live="polite"></div>
+        <form id="composer" class="composer">
+          <textarea id="prompt" rows="3" aria-label="Message the agent" placeholder="Describe what you’d like to build…" disabled></textarea>
+          <div class="composer-actions">
+            <div class="plus-wrap">
+              <button type="button" id="attach-file" class="icon-button plus-button" title="Add context" aria-label="Add context" aria-haspopup="menu" aria-expanded="false">＋</button>
+              <div id="plus-menu" class="plus-menu" role="menu" aria-label="Add context" hidden></div>
+            </div>
+            <button type="button" id="free-toggle" class="free-toggle" aria-pressed="false" hidden>All models</button>
+            <select id="access-select" class="access-select" aria-label="Level of access" data-access="ask">
+              <option value="read">Read only</option>
+              <option value="ask">Ask before acting</option>
+              <option value="auto">Auto-edit</option>
+              <option value="full">Full access</option>
+            </select>
+            <div class="model-wrap">
+              <button type="button" id="model-button" class="model-button" aria-haspopup="listbox" aria-expanded="false" aria-label="Model and power" disabled><span id="model-label" class="truncate">Configure model</span><span class="model-caret" aria-hidden="true">▾</span></button>
+              <div id="model-menu" class="model-menu" role="listbox" aria-label="Models and power" hidden></div>
+            </div>
+            <span class="grow"></span>
+            <button type="button" id="dictate" class="icon-button dictate-button" title="Voice dictation" aria-label="Voice dictation" aria-pressed="false" disabled>
+              <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></svg>
+            </button>
+            <button type="button" id="interrupt" class="button danger" hidden>Stop</button>
+            <button type="submit" id="send-message" class="send-button" aria-label="Send message" disabled>↑</button>
+          </div>
+        </form>
+        <div class="composer-hint"><span>Enter to send · Shift + Enter for a new line</span><span id="dictation-status" class="dictation-status" role="status"></span><button id="configure-model" class="text-button">Configure model</button></div>
+      </div>
+    </section>
+    <section id="attention" class="attention" aria-label="Attention" hidden>
+      <header class="attention-head">
+        <div class="attention-copy">
+          <h2>Attention</h2>
+          <p id="attention-summary" class="attention-summary">Requests and questions from every agent, in one place.</p>
+        </div>
+        <span class="grow"></span>
+        <button id="attention-refresh" class="icon-button" aria-label="Refresh requests" title="Refresh requests">↻</button>
+        <button id="attention-close" class="icon-button" aria-label="Close attention" title="Close attention">×</button>
+      </header>
+      <div class="attention-tabs" role="tablist" aria-label="Attention views">
+        <button id="attention-tab-waiting" class="attention-tab" role="tab" aria-selected="true" aria-controls="attention-list">Waiting <span id="attention-waiting-count" class="attention-tab-count" hidden>0</span></button>
+        <button id="attention-tab-history" class="attention-tab" role="tab" aria-selected="false" aria-controls="attention-list">History</button>
+      </div>
+      <div id="attention-list" class="attention-list" aria-live="polite"></div>
+    </section>
+    <section id="tools-page" class="tools-page" aria-label="Toolkit" hidden>
+      <header class="tools-head">
+        <div class="tools-copy">
+          <h2 id="tools-title">Toolkit</h2>
+          <p id="tools-summary" class="tools-summary"></p>
+        </div>
+        <span class="grow"></span>
+        <button id="tools-file" class="button" type="button" hidden>Install from file…</button>
+        <button id="tools-secondary" class="button" type="button"></button>
+        <button id="tools-primary" class="button primary" type="button" hidden></button>
+        <button id="tools-refresh" class="icon-button" aria-label="Refresh list" title="Refresh list">↻</button>
+        <button id="tools-close" class="icon-button" aria-label="Close" title="Close">×</button>
+      </header>
+      <div id="tools-tabs" class="tools-tabs" role="tablist" aria-label="Toolkit sections">
+        <button id="tools-tab-skills" class="tab" role="tab" aria-selected="true">Skills</button>
+        <button id="tools-tab-plugins" class="tab" role="tab" aria-selected="false" tabindex="-1">Plugins</button>
+        <button id="tools-tab-connectors" class="tab" role="tab" aria-selected="false" tabindex="-1">Connectors</button>
+      </div>
+      <div class="tools-toolbar">
+        <input id="tools-search" class="tools-search" type="search" autocomplete="off" spellcheck="false" aria-label="Search tasks, projects, skills, plugins, and connectors">
+        <div id="tools-chips" class="extension-chips" role="group" aria-label="Filter"></div>
+      </div>
+      <div id="tools-body" class="tools-body" aria-live="polite"></div>
+    </section>
+    <div id="inspector-resizer" class="inspector-resizer" role="separator" aria-orientation="vertical" aria-label="Resize project inspector" aria-controls="inspector" title="Drag to resize · double-click to hide the inspector" tabindex="0"></div>
+    <aside id="inspector" class="inspector" aria-label="File inspector">
+      <header class="inspector-head">Project inspector <span class="grow"></span><button id="refresh-files" class="icon-button" aria-label="Refresh files and changes">↻</button></header>
+      <div class="tabs" role="tablist" aria-label="Project inspection">
+        <button id="tab-activity" class="tab" role="tab" aria-selected="true" aria-controls="activity-panel">Activity</button>
+        <button id="tab-changes" class="tab" role="tab" aria-selected="false" aria-controls="changes-panel" tabindex="-1">Changes</button>
+        <button id="tab-files" class="tab" role="tab" aria-selected="false" aria-controls="files-panel" tabindex="-1">Files</button>
+        <button id="tab-browser" class="tab" role="tab" aria-selected="false" aria-controls="browser-panel" tabindex="-1">Browser</button>
+      </div>
+      <div id="activity-panel" class="inspection-panel activity-panel" role="tabpanel" aria-labelledby="tab-activity">
+        <div id="activity-body" class="activity-body" aria-live="polite"></div>
+      </div>
+      <div id="changes-panel" class="inspection-panel" role="tabpanel" aria-labelledby="tab-changes" hidden>
+        <select id="diff-scope" aria-label="Changes scope"><option value="workspace">Workspace changes</option><option value="session">Task changes</option></select>
+        <div id="change-list" class="file-list"></div>
+        <div class="file-heading"><span id="diff-path" class="truncate">No file selected</span><span class="grow"></span><button id="diff-open" class="text-button" disabled>Open file</button></div>
+        <div id="diff-view" class="diff-view" tabindex="0"></div>
+        <div id="diff-peek" class="diff-peek" aria-live="polite" hidden></div>
+      </div>
+      <div id="files-panel" class="inspection-panel" role="tabpanel" aria-labelledby="tab-files" hidden>
+        <div id="file-tree" class="file-tree" aria-label="Project files"></div>
+        <div class="file-heading"><span id="editor-path" class="truncate">No file selected</span><span class="grow"></span><button id="reload-file" class="text-button" disabled>Reload</button><button id="save-file" class="text-button" disabled>Save</button></div>
+        <div id="editor-host" class="editor-host"><p class="panel-empty">Open a project file to edit.</p></div>
+        <p id="editor-state" class="editor-state" role="status"></p>
+      </div>
+      <div id="browser-panel" class="inspection-panel" role="tabpanel" aria-labelledby="tab-browser" hidden>
+        <form id="browser-bar" class="browser-bar">
+          <button type="button" id="browser-back" class="icon-button" aria-label="Back" title="Back" disabled>‹</button>
+          <button type="button" id="browser-forward" class="icon-button" aria-label="Forward" title="Forward" disabled>›</button>
+          <button type="button" id="browser-reload" class="icon-button" aria-label="Reload page" title="Reload" disabled>↻</button>
+          <input id="browser-url" type="text" inputmode="url" autocomplete="off" spellcheck="false" placeholder="Enter an address" aria-label="Web address">
+          <button type="submit" class="text-button">Go</button>
+        </form>
+        <p id="browser-status" class="browser-status" role="status">Pages open inside Relay without access to your files, terminal, or agent tools.</p>
+        <div id="browser-stage" class="browser-stage"><p class="panel-empty">Type an http or https address above to preview a page here.</p></div>
+      </div>
+    </aside>
+    <section id="terminal" class="terminal" aria-label="Project terminal" hidden>
+      <header class="terminal-header"><span>Terminal</span><span id="terminal-status" class="muted">Opening…</span><span class="grow"></span><button id="close-terminal" class="icon-button" aria-label="Close terminal">×</button></header>
+      <div id="terminal-host" class="terminal-host"></div>
+    </section>
+    <footer class="statusbar"><span id="engine-dot" class="status-dot"></span><span id="engine-status" role="status">Loading engine status…</span><button id="retry-state" class="text-button" hidden>Refresh</button><span class="grow"></span><span id="workspace-path" class="truncate"></span><span id="app-version"></span></footer>
+  </main>
+  <div id="notice" class="notice" role="status" hidden><span id="notice-text"></span><button id="dismiss-notice" class="icon-button" aria-label="Dismiss notification">×</button></div>
+  <script type="module" src="./main.ts"></script>
+</body>
+</html>

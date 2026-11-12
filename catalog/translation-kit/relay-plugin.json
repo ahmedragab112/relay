@@ -1,0 +1,6 @@
+{
+  "id": "translation-kit",
+  "name": "Translation kit",
+  "version": "1.0.0",
+  "description": "Commands for localization and translated copy."
+}

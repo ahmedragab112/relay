@@ -1,0 +1,6 @@
+{
+  "id": "api-kit",
+  "name": "API kit",
+  "version": "1.0.0",
+  "description": "Commands for designing endpoints and reviewing HTTP APIs."
+}

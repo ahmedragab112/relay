@@ -1,0 +1,6 @@
+{
+  "id": "git-suite",
+  "name": "Git suite",
+  "version": "1.0.0",
+  "description": "Commands for commit messages and rebase planning."
+}

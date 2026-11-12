@@ -1,0 +1,6 @@
+{
+  "id": "adr-kit",
+  "name": "ADR kit",
+  "version": "1.0.0",
+  "description": "Commands for architecture decision records."
+}

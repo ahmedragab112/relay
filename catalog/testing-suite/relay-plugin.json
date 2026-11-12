@@ -1,0 +1,6 @@
+{
+  "id": "testing-suite",
+  "name": "Testing suite",
+  "version": "1.0.0",
+  "description": "Commands for writing tests and planning coverage."
+}

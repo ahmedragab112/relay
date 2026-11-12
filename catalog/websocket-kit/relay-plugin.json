@@ -1,0 +1,6 @@
+{
+  "id": "websocket-kit",
+  "name": "WebSocket kit",
+  "version": "1.0.0",
+  "description": "Commands for realtime design and reconnection."
+}

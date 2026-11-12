@@ -1,0 +1,6 @@
+{
+  "id": "debugging-suite",
+  "name": "Debugging suite",
+  "version": "1.0.0",
+  "description": "Commands for reproducing failures and tracing a bad value to its source."
+}

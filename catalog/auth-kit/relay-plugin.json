@@ -1,0 +1,6 @@
+{
+  "id": "auth-kit",
+  "name": "Auth kit",
+  "version": "1.0.0",
+  "description": "Commands for authentication review and permission mapping."
+}

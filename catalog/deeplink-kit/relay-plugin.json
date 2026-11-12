@@ -1,0 +1,6 @@
+{
+  "id": "deeplink-kit",
+  "name": "Deep link kit",
+  "version": "1.0.0",
+  "description": "Commands for URL schemes and universal links."
+}

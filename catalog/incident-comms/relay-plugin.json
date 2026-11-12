@@ -1,0 +1,6 @@
+{
+  "id": "incident-comms",
+  "name": "Incident comms",
+  "version": "1.0.0",
+  "description": "Commands for status updates during incidents."
+}

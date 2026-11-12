@@ -1,0 +1,6 @@
+{
+  "id": "security-suite",
+  "name": "Security suite",
+  "version": "1.0.0",
+  "description": "Commands for security review and secret scanning."
+}

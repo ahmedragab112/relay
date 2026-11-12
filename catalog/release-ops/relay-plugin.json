@@ -1,0 +1,6 @@
+{
+  "id": "release-ops",
+  "name": "Release ops",
+  "version": "1.0.0",
+  "description": "Commands for rollouts and rollbacks."
+}
