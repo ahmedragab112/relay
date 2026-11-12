@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile, rename, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import type { ContextSettings, GeneralSettings, McpServer, MessageReaction, PluginRecord, Preferences, PreferencesPatch, ProviderInput, ProviderSummary, Workspace } from '../shared/contracts.js';
+import type { AutoSettings, Accent, ContextSettings, GeneralSettings, McpServer, MessageReaction, PluginRecord, Preferences, PreferencesPatch, ProviderInput, ProviderSummary, Workspace } from '../shared/contracts.js';
 import { CONFIGURABLE_PROVIDERS, isConfigurableProviderID, providerPreset } from '../shared/providers.js';
 import { text, validateEndpoint } from './security.js';
 import type { AccessLevel, DictationSettings } from '../shared/contracts.js';
@@ -38,9 +38,14 @@ export const generalDefaults: GeneralSettings = {
   skillRegistry: '',
   turnNotifications: true,
   turnSound: true,
+  requestNotifications: true,
+  language: 'en',
+  layout: 'tabs',
+  accent: 'blue',
 };
 
 export const contextDefaults: ContextSettings = { autoCompact: false, compactThreshold: 80, shareProject: true };
+export const autoDefaults: AutoSettings = { includeFree: true, maxTokens: 4096, modelIds: [] };
 
 const flag = (value: unknown, fallback: boolean): boolean => typeof value === 'boolean' ? value : fallback;
 
@@ -94,6 +99,10 @@ function sanitizeGeneral(value: unknown): GeneralSettings {
     skillRegistry: registry,
     turnNotifications: flag(raw.turnNotifications, generalDefaults.turnNotifications),
     turnSound: flag(raw.turnSound, generalDefaults.turnSound),
+    requestNotifications: flag(raw.requestNotifications, generalDefaults.requestNotifications),
+    language: raw.language === 'ar' ? 'ar' : 'en',
+    layout: raw.layout === 'inbox' || raw.layout === 'focus' ? raw.layout : 'tabs',
+    accent: ['emerald', 'amber', 'rose', 'violet', 'cyan'].includes(raw.accent as string) ? raw.accent as Accent : 'blue',
   };
 }
 
@@ -106,6 +115,13 @@ function sanitizeContext(value: unknown): ContextSettings {
     compactThreshold: threshold,
     shareProject: flag(raw.shareProject, contextDefaults.shareProject),
   };
+}
+
+function sanitizeAuto(value: unknown): AutoSettings {
+  const raw = (value && typeof value === 'object' ? value : {}) as Partial<AutoSettings>;
+  const maxTokens = typeof raw.maxTokens === 'number' && Number.isFinite(raw.maxTokens) && raw.maxTokens > 0 ? Math.min(256000, Math.round(raw.maxTokens)) : autoDefaults.maxTokens;
+  const modelIds = Array.isArray(raw.modelIds) ? raw.modelIds.filter((item): item is string => typeof item === 'string').slice(0, 20) : [];
+  return { includeFree: flag(raw.includeFree, autoDefaults.includeFree), maxTokens, modelIds };
 }
 
 function sanitizeArchived(value: unknown): string[] {
@@ -222,6 +238,7 @@ function sanitizeSettings(data: StoredSettings): StoredSettings {
       theme, defaultModel, defaultAccess, modelVariant, dictation,
       general: sanitizeGeneral(rawPreferences.general),
       context: sanitizeContext(rawPreferences.context),
+      auto: sanitizeAuto(rawPreferences.auto),
       archivedSessions: sanitizeArchived(rawPreferences.archivedSessions),
       ...(active ? { activeWorkspaceId: active } : {}),
     },
@@ -267,7 +284,7 @@ export class SettingsStore {
     preferences: {
       theme: 'dark', defaultModel: '', defaultAccess: 'ask', modelVariant: '',
       dictation: { provider: 'groq', model: 'whisper-large-v3-turbo' },
-      general: { ...generalDefaults }, context: { ...contextDefaults }, archivedSessions: [],
+      general: { ...generalDefaults }, context: { ...contextDefaults }, auto: { ...autoDefaults }, archivedSessions: [],
     },
     workspaces: [], providers: [], mcp: [], plugins: [], reactions: [],
   };
@@ -360,18 +377,31 @@ export class SettingsStore {
     }
     if (values.general !== undefined) this.data.preferences.general = this.mergeGeneral(values.general, this.data.preferences.general);
     if (values.context !== undefined) this.data.preferences.context = this.mergeContext(values.context, this.data.preferences.context);
+    if (values.auto !== undefined) this.data.preferences.auto = this.mergeAuto(values.auto, this.data.preferences.auto);
     await this.save();
   }
 
   private mergeGeneral(patch: Partial<GeneralSettings>, current: GeneralSettings): GeneralSettings {
     if (!patch || typeof patch !== 'object') throw new Error('Invalid general settings.');
     const next = { ...current };
-    const booleans = ['inputWhileRunning', 'slashCommandDisplay', 'skipUnansweredQuestions', 'promptSuggestions', 'showThinking', 'goalDriven', 'homeGame', 'skillSuggestions', 'turnNotifications', 'turnSound'] as const;
+    const booleans = ['inputWhileRunning', 'slashCommandDisplay', 'skipUnansweredQuestions', 'promptSuggestions', 'showThinking', 'goalDriven', 'homeGame', 'skillSuggestions', 'turnNotifications', 'turnSound', 'requestNotifications'] as const;
     for (const key of booleans) {
       const value = patch[key];
       if (value === undefined) continue;
       if (typeof value !== 'boolean') throw new Error('General settings toggles must be on or off.');
       next[key] = value;
+    }
+    if (patch.language !== undefined) {
+      if (patch.language !== 'en' && patch.language !== 'ar') throw new Error('Choose a valid language.');
+      next.language = patch.language;
+    }
+    if (patch.layout !== undefined) {
+      if (patch.layout !== 'tabs' && patch.layout !== 'inbox' && patch.layout !== 'focus') throw new Error('Choose a valid layout.');
+      next.layout = patch.layout;
+    }
+    if (patch.accent !== undefined) {
+      if (!['blue', 'emerald', 'amber', 'rose', 'violet', 'cyan'].includes(patch.accent)) throw new Error('Choose a valid accent color.');
+      next.accent = patch.accent;
     }
     if (patch.conversationDisplay !== undefined) {
       if (!['comfortable', 'compact'].includes(patch.conversationDisplay)) throw new Error('Choose a valid conversation display.');
@@ -394,6 +424,24 @@ export class SettingsStore {
       next.shareProject = patch.shareProject;
     }
     if (patch.compactThreshold !== undefined) next.compactThreshold = compactThreshold(patch.compactThreshold);
+    return next;
+  }
+
+  private mergeAuto(patch: Partial<AutoSettings>, current: AutoSettings): AutoSettings {
+    if (!patch || typeof patch !== 'object') throw new Error('Invalid auto settings.');
+    const next = { ...current };
+    if (patch.includeFree !== undefined) {
+      if (typeof patch.includeFree !== 'boolean') throw new Error('Include free must be on or off.');
+      next.includeFree = patch.includeFree;
+    }
+    if (patch.maxTokens !== undefined) {
+      if (typeof patch.maxTokens !== 'number' || !Number.isFinite(patch.maxTokens) || patch.maxTokens <= 0) throw new Error('Max tokens must be a positive number.');
+      next.maxTokens = Math.min(256000, Math.round(patch.maxTokens));
+    }
+    if (patch.modelIds !== undefined) {
+      if (!Array.isArray(patch.modelIds) || !patch.modelIds.every((item) => typeof item === 'string')) throw new Error('Model list must be an array of model IDs.');
+      next.modelIds = patch.modelIds.slice(0, 20);
+    }
     return next;
   }
 

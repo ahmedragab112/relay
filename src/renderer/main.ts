@@ -1,6 +1,7 @@
 import './styles.css';
 import type { AppEvent, AppState, EngineStatus, SearchMode, SessionSummary } from '../shared/contracts';
 import { byId, button, el, notify, report, run } from './dom';
+import { applyLanguage } from './i18n';
 import { confirmAction, dialog } from './dialog';
 import { ChatView } from './chat';
 import { Composer } from './composer';
@@ -16,7 +17,6 @@ import { playChime } from './chime';
 import { TerminalView } from './terminal';
 import { showSettings } from './settings';
 import { showAutomation } from './automation';
-import { showAgents } from './integrations';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
 import { showSearch } from './search';
@@ -42,6 +42,7 @@ let lastEngine: EngineStatus | undefined;
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const chat = new ChatView({
   copy: async value => { await window.relay.copyText(value); notify('Copied response.'); },
+  summary: async value => { await window.relay.copyText(value); notify('Chat summary copied.'); },
   react: async (messageId, reaction) => {
     if (!selectedId) return;
     await window.relay.setMessageReaction(selectedId, messageId, reaction);
@@ -75,7 +76,7 @@ const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
 const tools = new ToolsPage({ openTask: openSession, openFolder: id => { void openFolder(id); } });
 const queue = new QueueView(message => composer.restoreQueued(message));
-const review = new ReviewCard(() => { showInspector(); inspector.reviewSession(); });
+const review = new ReviewCard(() => { showInspector(); inspector.reviewSession(); }, () => inspector.follow('edit'));
 const usage = new UsageMeter(() => { messagesReload.request(); changesReload.request(); reviewReload.request(); });
 const messagesReload = coalescedReload(() => chat.reload(), error => report('Conversation refresh failed', error), 90);
 const queueReload = coalescedReload(() => queue.reload(), error => report('Queued messages refresh failed', error), 120);
@@ -104,7 +105,6 @@ function engine(status: EngineStatus): void {
   inspector.setReady(status.state === 'ready');
   composer.setEngine(status);
   byId<HTMLButtonElement>('new-task').disabled = changingWorkspace || !state?.workspace || status.state !== 'ready';
-  byId<HTMLButtonElement>('agents-button').disabled = !state?.workspace || status.state !== 'ready';
   byId<HTMLButtonElement>('tools-button').disabled = !state?.workspace || status.state !== 'ready';
   attention.setEnabled(Boolean(state?.workspace) && status.state === 'ready');
 }
@@ -135,8 +135,12 @@ function apply(next: AppState): void {
   byId('app-version').textContent = `Relay ${next.version} · ${next.arch}`;
   byId<HTMLButtonElement>('terminal-button').disabled = !next.workspace || changingWorkspace;
   byId('app').classList.toggle('compact-chat', next.preferences.general.conversationDisplay === 'compact');
+  byId('app').classList.toggle('layout-inbox', next.preferences.general.layout === 'inbox');
+  byId('app').classList.toggle('layout-focus', next.preferences.general.layout === 'focus');
+  document.documentElement.dataset.accent = next.preferences.general.accent;
   byId('conversation').classList.toggle('hide-thinking', !next.preferences.general.showThinking);
   requests.setSkipUnanswered(next.preferences.general.skipUnansweredQuestions);
+  applyLanguage(next.preferences.general.language);
   appearance(); engine(next.engine);
   composer.setPreferences(next.preferences);
   if (!initialized || previousWorkspace !== next.workspace?.id) {
@@ -355,10 +359,10 @@ function palette(): void {
     commands.push({ label: 'New task', shortcut: key('Mod+N'), action: newTask },
       { label: 'Go to file…', shortcut: key('Mod+P'), action: () => search('files') },
       { label: 'Search in files…', shortcut: key('Mod+F'), action: () => search('content') },
-      { label: 'Open in-app browser', action: () => { showInspector(); inspector.tab('browser'); inspector.browser.focus(); } },
+      { label: 'Open in-app browser', action: () => { showInspector(); inspector.openBrowser(); } },
       { label: 'Open terminal', action: () => terminal.open() },
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
-      { label: 'Agents', action: showAgents }, { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
+      { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
       { label: 'Scheduled automation', action: openAutomation },
       { label: 'Attention — agent requests', action: () => { backgroundRunning(); attention.show(); } },
       { label: 'Usage & context', action: () => usage.open() },
@@ -380,21 +384,29 @@ function event(event: AppEvent): void {
       void refreshModels().catch(error => report('Could not refresh available models', error));
       void refreshSkills(); void refreshCommands();
     }
+  } else if (event.type === 'models-changed') {
+    refreshModels();
+  } else if (event.type === 'agent-open-page') {
+    showInspector(); inspector.openPage(event.url); notify('Agent opened a page in the browser.');
+  } else if (event.type === 'auto-switched') {
+    if (event.sessionId === selectedId) notify(`Model limit reached — switched to ${event.model} and continued the task.`);
+    messagesReload.request();
   } else if (event.type === 'error') report('Engine reported an error', event.message);
   if (changingWorkspace) return;
   requests.event(event);
   const attentionEvent = event.type === 'permission' || event.type === 'permission-resolved' || event.type === 'question' || event.type === 'question-resolved';
   if (attentionEvent || (attention.isOpen && (event.type === 'session-idle' || event.type === 'session-changed' || event.type === 'sessions-changed'))) attentionReload.request();
   if (event.type === 'job-preview') {
-    showInspector(); inspector.tab('browser'); inspector.browser.open(event.url);
+    showInspector(); inspector.openPage(event.url);
     let host = event.url;
     try { host = new URL(event.url).host; } catch { /* keep the raw address */ }
     notify(`Automation “${event.jobName}” opened ${host} in the editor.`);
   } else if (event.type === 'session-stream') {
-    if (event.sessionId === selectedId) chat.stream(event);
+    if (event.sessionId === selectedId) { chat.stream(event); inspector.beginTurn(); }
   } else if (event.type === 'session-changed') {
     if (event.sessionId === selectedId) {
       messagesReload.request(); queueReload.request();
+      reviewReload.request();
       if (visibleChanges()) changesReload.request();
     }
     if (visibleActivity()) activityReload.request();
@@ -402,6 +414,7 @@ function event(event: AppEvent): void {
   } else if (event.type === 'session-idle') {
     if (event.chime) playChime();
     if (event.sessionId === selectedId) {
+      inspector.endTurn();
       messagesReload.request(); queueReload.request(); usage.load(); chat.settleStream();
       if (visibleChanges()) changesReload.request();
       reviewReload.request();
@@ -454,9 +467,9 @@ bind('task-menu', () => sessions.menu());
 bind('attention-button', toggleAttention);
 bind('attention-close', () => attention.close());
 bind('attention-refresh', () => attention.reload());
+bind('search-button', () => search('files'));
 bind('settings-button', settings);
 bind('configure-model', settings);
-bind('agents-button', showAgents);
 bind('automation-button', openAutomation);
 bind('tools-button', () => openTools('skills'));
 bind('palette-button', palette);

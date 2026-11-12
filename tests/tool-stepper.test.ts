@@ -9,19 +9,19 @@ const tool = (name: string, state: ToolPart['state']): ToolPart => ({
 
 test('completed steps summarize their count and tools', () => {
   assert.deepEqual(stepperSummary([tool('read', 'completed'), tool('edit', 'completed')]), {
-    state: 'completed', label: '2 steps completed', detail: 'read · edit',
+    state: 'completed', label: '2 steps completed', detail: 'read · edit', completed: 2, remaining: 0,
   });
 });
 
 test('a running step keeps the whole stepper active', () => {
   assert.deepEqual(stepperSummary([tool('read', 'completed'), tool('bash', 'running')]), {
-    state: 'running', label: '2 steps in progress', detail: 'read · bash',
+    state: 'running', label: '1 of 2 steps done · 1 remaining', detail: 'read · bash', completed: 1, remaining: 1,
   });
 });
 
 test('an error outranks running steps', () => {
   assert.deepEqual(stepperSummary([tool('bash', 'running'), tool('edit', 'error')]), {
-    state: 'error', label: '2 steps need attention', detail: 'bash · edit',
+    state: 'error', label: '0 of 2 steps done · 1 remaining', detail: 'bash · edit', completed: 0, remaining: 1,
   });
 });
 
@@ -34,8 +34,8 @@ test('only deltas from the default open state count as a remembered choice', () 
 
 test('one step reads naturally and long names are capped', () => {
   assert.equal(stepperSummary([tool('read', 'completed')]).label, '1 step completed');
-  assert.equal(stepperSummary([tool('read', 'error')]).label, '1 step needs attention');
-  assert.equal(stepperSummary([tool('read', 'running')]).label, '1 step in progress');
+  assert.equal(stepperSummary([tool('read', 'error')]).label, '0 of 1 step done · attention needed');
+  assert.equal(stepperSummary([tool('read', 'running')]).label, '0 of 1 step done · 1 remaining');
   assert.equal(stepperSummary([
     tool('read', 'completed'), tool('edit', 'completed'), tool('bash', 'completed'), tool('grep', 'completed'), tool('read', 'completed'),
   ]).detail, 'read · edit · bash +1');

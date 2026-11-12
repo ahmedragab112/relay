@@ -32,6 +32,9 @@ export interface DictationSettings {
 }
 
 export type ConversationDisplay = 'comfortable' | 'compact';
+export type Language = 'en' | 'ar';
+export type Layout = 'tabs' | 'inbox' | 'focus';
+export type Accent = 'blue' | 'emerald' | 'amber' | 'rose' | 'violet' | 'cyan';
 
 export interface GeneralSettings {
   inputWhileRunning: boolean;
@@ -47,12 +50,22 @@ export interface GeneralSettings {
   skillRegistry: string;
   turnNotifications: boolean;
   turnSound: boolean;
+  requestNotifications: boolean;
+  language: Language;
+  layout: Layout;
+  accent: Accent;
 }
 
 export interface ContextSettings {
   autoCompact: boolean;
   compactThreshold: number;
   shareProject: boolean;
+}
+
+export interface AutoSettings {
+  includeFree: boolean;
+  maxTokens: number;
+  modelIds: string[];
 }
 
 export interface Preferences {
@@ -63,6 +76,7 @@ export interface Preferences {
   dictation: DictationSettings;
   general: GeneralSettings;
   context: ContextSettings;
+  auto: AutoSettings;
   archivedSessions: string[];
   activeWorkspaceId?: string;
 }
@@ -75,6 +89,7 @@ export interface PreferencesPatch {
   dictation?: DictationSettings;
   general?: Partial<GeneralSettings>;
   context?: Partial<ContextSettings>;
+  auto?: Partial<AutoSettings>;
 }
 
 export interface ContextBlock {
@@ -118,6 +133,20 @@ export interface ModelOption {
   free?: boolean;
   variants?: string[];
   context?: number;
+  cost?: number;
+  limited?: boolean;
+}
+
+export function autoModelCandidates(models: ModelOption[], settings?: AutoSettings): Array<{ id: string; variant: string }> {
+  const includeFree = settings?.includeFree ?? true;
+  const allowed = settings?.modelIds?.length ? new Set(settings.modelIds) : null;
+  return models
+    .filter((model) => model.connected)
+    .filter((model) => includeFree || !model.free)
+    .filter((model) => !allowed || allowed.has(model.id))
+    .sort((a, b) => (a.cost ?? 0) - (b.cost ?? 0) || (a.context ?? 0) - (b.context ?? 0))
+    .slice(0, 6)
+    .map((model) => ({ id: model.id, variant: model.variants?.[0] ?? '' }));
 }
 
 export interface AgentOption {
@@ -297,6 +326,8 @@ export interface ChatMessage {
   completedAt?: number;
   tokens?: number;
   cost?: number;
+  model?: string;
+  modelVariant?: string;
   parts: Array<TextPart | ToolPart | AttachmentPart | CompactionPart>;
   error?: string;
   reaction?: MessageReaction;
@@ -597,6 +628,8 @@ export interface SendMessageInput {
   context?: ContextBlock[];
   planOnly?: boolean;
   delivery?: 'steer' | 'queue';
+  auto?: boolean;
+  autoSettings?: AutoSettings;
 }
 
 export interface QueuedMessage {
@@ -634,6 +667,9 @@ export type AppEvent =
   | { type: 'job-preview'; jobId: string; jobName: string; url: string }
   | { type: 'terminal-data'; id: string; data: string }
   | { type: 'terminal-exit'; id: string; code: number }
+  | { type: 'models-changed' }
+  | { type: 'agent-open-page'; url: string }
+  | { type: 'auto-switched'; sessionId: string; model: string; detail: string }
   | { type: 'error'; message: string };
 
 export interface RelayAPI {
@@ -656,6 +692,7 @@ export interface RelayAPI {
   restoreSession(id: string): Promise<void>;
   listArchivedSessions(): Promise<SessionSummary[]>;
   sendMessage(input: SendMessageInput): Promise<void>;
+  setSessionAccess(sessionId: string, access: AccessLevel): Promise<void>;
   listQueuedMessages(sessionId: string): Promise<QueuedMessage[]>;
   removeQueuedMessage(sessionId: string, id: string): Promise<void>;
   steerQueuedMessage(sessionId: string, id: string): Promise<void>;

@@ -34,6 +34,7 @@ export function mapMessages(messages: SessionMessageInfo[]): ChatMessage[] {
     if (message.type !== 'assistant') return [];
     return [{ id: message.id, role: 'assistant', createdAt: message.time.created,
       ...(message.time.completed === undefined ? {} : { completedAt: message.time.completed }),
+      ...(message.model ? { model: `${message.model.providerID}::${message.model.id}`, ...(message.model.variant ? { modelVariant: message.model.variant } : {}) } : {}),
       ...(message.tokens ? { tokens: tokenTotal(message.tokens) } : {}),
       ...(message.cost ? { cost: message.cost } : {}),
       error: message.error?.message, parts: message.content.map((part, index) => {

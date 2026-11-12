@@ -7,7 +7,7 @@ import { BrowserPane } from './browser';
 import { FileEditor } from './editor';
 import { fileIconElement } from './file-icons';
 import { language, loadMonaco } from './monaco';
-import { parsePatch } from './state';
+import { followTab, parsePatch } from './state';
 
 const TABS = ['activity', 'changes', 'files', 'browser'] as const;
 type InspectorTab = typeof TABS[number];
@@ -32,6 +32,8 @@ export class Inspector {
   private ready = false;
   private disposed = false;
   private userSelectedTab = false;
+  private turnActive = false;
+  private browserUsed = false;
   private active: InspectorTab = 'activity';
 
   get currentTab(): InspectorTab { return this.active; }
@@ -44,15 +46,18 @@ export class Inspector {
       control.addEventListener('keydown', event => {
         if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
         event.preventDefault();
-        const index = TABS.indexOf(tab);
-        const next = event.key === 'Home' ? TABS[0] : event.key === 'End' ? TABS[TABS.length - 1]
-          : TABS[(index + (event.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length];
+        const available = TABS.filter(name => !byId(`tab-${name}`).hidden);
+        const index = available.indexOf(tab);
+        if (index < 0) return;
+        const next = event.key === 'Home' ? available[0] : event.key === 'End' ? available[available.length - 1]
+          : available[(index + (event.key === 'ArrowRight' ? 1 : available.length - 1)) % available.length];
         this.tab(next); byId(`tab-${next}`).focus();
       });
     });
     this.scope.addEventListener('change', () => { this.signature = ''; void this.reloadChanges(); });
     byId('refresh-files').addEventListener('click', () => void this.refresh());
     byId('diff-open').addEventListener('click', () => this.openSelected());
+    this.syncBrowserTab();
   }
 
   openSelected(): void {
@@ -74,10 +79,55 @@ export class Inspector {
     void this.editor.open(path, false, line);
   }
 
+  // Clicking a tab is the reader taking control: the agent stops steering the view for the
+  // rest of the turn.
   tab(tab: InspectorTab): void {
     this.userSelectedTab = true;
+    this.show(tab);
+  }
+
+  private show(tab: InspectorTab): void {
+    if (tab === 'browser') this.browserUsed = true;
+    this.syncBrowserTab();
     this.showTab(tab);
     this.refreshTab(tab);
+  }
+
+  // A turn starting resets the reader's override so the inspector can follow the agent
+  // again. Further signals within the turn respect it.
+  beginTurn(): void {
+    if (this.turnActive) return;
+    this.turnActive = true;
+    this.userSelectedTab = false;
+    this.follow('turn-start');
+  }
+
+  endTurn(): void { this.turnActive = false; }
+
+  follow(signal: 'turn-start' | 'edit' | 'page'): void {
+    if (signal !== 'page' && !this.turnActive) return;
+    const target = followTab(signal, this.userSelectedTab);
+    if (target) this.show(target);
+  }
+
+  // The agent (or an automation) opened a page: the browser tab appears and takes the view.
+  openPage(url: string): void {
+    this.browserUsed = true;
+    this.show('browser');
+    this.browser.open(url);
+  }
+
+  // "Open in-app browser" from the palette is a reader action, so it also hands control over.
+  openBrowser(): void {
+    this.userSelectedTab = true;
+    this.browserUsed = true;
+    this.show('browser');
+    this.browser.focus();
+  }
+
+  private syncBrowserTab(): void {
+    byId<HTMLButtonElement>('tab-browser').hidden = !this.browserUsed;
+    if (!this.browserUsed && this.active === 'browser') this.showTab('activity');
   }
 
   private refreshTab(tab: InspectorTab): void {
@@ -109,6 +159,8 @@ export class Inspector {
     this.editor.reset(); this.clearDiff(); this.selectedPath = ''; this.signature = '';
     byId('file-tree').replaceChildren(); byId('change-list').replaceChildren();
     this.activity.setSession('');
+    this.browserUsed = false; this.turnActive = false; this.userSelectedTab = false;
+    this.syncBrowserTab();
     void this.refresh();
   }
   setSession(id: string): void {

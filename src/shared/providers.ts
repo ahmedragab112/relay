@@ -29,6 +29,7 @@ export interface ProviderPreset {
   baseURL?: string;
   keyless: boolean;
   description: string;
+  keyUrl?: string;
 }
 
 const compatible = '@opencode/ai/providers/openai-compatible';
@@ -40,44 +41,44 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'google', name: 'Google AI Studio', group: 'free', package: '@opencode/ai/providers/google', keyless: false,
-    description: 'Gemini free tier. Create an API key in Google AI Studio.',
+    description: 'Gemini free tier. Create an API key in Google AI Studio.', keyUrl: 'https://aistudio.google.com/apikey',
   },
   {
     id: 'openrouter', name: 'OpenRouter', group: 'free', package: '@opencode/ai/providers/openrouter',
     baseURL: 'https://openrouter.ai/api/v1', keyless: false,
-    description: 'Free models are marked with :free. Free-only mode hides paid models.',
+    description: 'Free models are marked with :free. Free-only mode hides paid models.', keyUrl: 'https://openrouter.ai/keys',
   },
   {
     id: 'groq', name: 'Groq', group: 'free', package: compatible, baseURL: 'https://api.groq.com/openai/v1', keyless: false,
-    description: 'Fast free tier for open models, including Whisper transcription.',
+    description: 'Fast free tier for open models, including Whisper transcription.', keyUrl: 'https://console.groq.com/keys',
   },
   {
     id: 'cerebras', name: 'Cerebras', group: 'free', package: compatible, baseURL: 'https://api.cerebras.ai/v1', keyless: false,
-    description: 'Free tier for fast open-model inference.',
+    description: 'Free tier for fast open-model inference.', keyUrl: 'https://cloud.cerebras.ai/',
   },
   {
     id: 'mistral', name: 'Mistral', group: 'free', package: compatible, baseURL: 'https://api.mistral.ai/v1', keyless: false,
-    description: 'Mistral free tier for open models.',
+    description: 'Mistral free tier for open models.', keyUrl: 'https://console.mistral.ai/api-keys/',
   },
   {
     id: 'github-models', name: 'GitHub Models', group: 'free', package: compatible, baseURL: 'https://models.github.ai/inference', keyless: false,
-    description: 'Free model playground with a GitHub personal access token.',
+    description: 'Free model playground with a GitHub personal access token.', keyUrl: 'https://github.com/settings/tokens',
   },
   {
     id: 'huggingface', name: 'Hugging Face', group: 'free', package: compatible, baseURL: 'https://router.huggingface.co/v1', keyless: false,
-    description: 'Inference router with a free monthly allowance.',
+    description: 'Inference router with a free monthly allowance.', keyUrl: 'https://huggingface.co/settings/tokens',
   },
   {
     id: 'nvidia', name: 'NVIDIA NIM', group: 'free', package: compatible, baseURL: 'https://integrate.api.nvidia.com/v1', keyless: false,
-    description: 'NVIDIA hosted models with free developer credits.',
+    description: 'NVIDIA hosted models with free developer credits.', keyUrl: 'https://build.nvidia.com/',
   },
   {
     id: 'sambanova', name: 'SambaNova', group: 'free', package: compatible, baseURL: 'https://api.sambanova.ai/v1', keyless: false,
-    description: 'Free developer tier for open models.',
+    description: 'Free developer tier for open models.', keyUrl: 'https://cloud.sambanova.ai/',
   },
   {
     id: 'together', name: 'Together AI', group: 'free', package: compatible, baseURL: 'https://api.together.xyz/v1', keyless: false,
-    description: 'Open-model hosting with starter credits.',
+    description: 'Open-model hosting with starter credits.', keyUrl: 'https://api.together.xyz/settings/api-keys',
   },
   {
     id: 'ollama', name: 'Ollama', group: 'local', package: compatible, baseURL: 'http://localhost:11434/v1', keyless: true,
@@ -93,11 +94,11 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   },
   {
     id: 'openai', name: 'OpenAI', group: 'paid', package: '@opencode/ai/providers/openai', keyless: false,
-    description: 'Paid OpenAI API models.',
+    description: 'Paid OpenAI API models.', keyUrl: 'https://platform.openai.com/api-keys',
   },
   {
     id: 'anthropic', name: 'Anthropic', group: 'paid', package: '@opencode/ai/providers/anthropic', keyless: false,
-    description: 'Paid Anthropic Claude models.',
+    description: 'Paid Anthropic Claude models.', keyUrl: 'https://console.anthropic.com/settings/keys',
   },
   {
     id: 'custom', name: 'Custom', group: 'custom', package: compatible, keyless: true,

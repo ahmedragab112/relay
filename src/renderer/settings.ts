@@ -1,26 +1,50 @@
-import type { AppState, GeneralSettings, PreferencesPatch, ProviderInput, SessionSummary, Theme } from '../shared/contracts';
+import type { Accent, AppState, GeneralSettings, Layout, ModelOption, PreferencesPatch, ProviderInput, SessionSummary, Theme } from '../shared/contracts';
 import { CONFIGURABLE_PROVIDERS, providerName, providerPreset, type ConfigurableProviderID } from '../shared/providers';
-import { button, el, errorText, field, option } from './dom';
-import { confirmAction, dialog } from './dialog';
+import { byId, button, el, errorText, field, option, report } from './dom';
+import { confirmAction } from './dialog';
+import { applyLanguage } from './i18n';
 
 const groupLabel: Record<string, string> = { free: 'Free', local: 'Local', paid: 'Paid', custom: 'Custom' };
-type Category = 'general' | 'appearance' | 'context' | 'voice' | 'providers' | 'archive' | 'about';
+type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'archive' | 'about';
 
 const navigation: Array<{ group: string; items: Array<{ id: Category; label: string }> }> = [
-  { group: 'Relay', items: [{ id: 'general', label: 'General' }, { id: 'appearance', label: 'Appearance' }, { id: 'context', label: 'Context & usage' }] },
+  { group: 'Relay', items: [{ id: 'general', label: 'General' }, { id: 'appearance', label: 'Appearance' }, { id: 'context', label: 'Context & usage' }, { id: 'auto', label: 'Auto model' }] },
   { group: 'Connect', items: [{ id: 'voice', label: 'Voice dictation' }, { id: 'providers', label: 'Model providers' }] },
   { group: 'Data', items: [{ id: 'archive', label: 'Archived tasks' }, { id: 'about', label: 'About Relay' }] },
 ];
 
+let settingsWired = false;
+
+export function closeSettings(): void {
+  byId('settings-shell').replaceChildren();
+  byId('settings-page').hidden = true;
+  byId('app').classList.remove('settings-open');
+  byId('settings-button').focus();
+}
+
 export function showSettings(getState: () => AppState, apply: (state: AppState) => void, refreshModels: () => Promise<void>): void {
-  const modal = dialog('Settings');
-  modal.root.classList.add('settings-dialog');
+  const page = byId('settings-page');
+  if (!settingsWired) {
+    settingsWired = true;
+    byId('settings-close').addEventListener('click', () => closeSettings());
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !page.hidden) { event.preventDefault(); closeSettings(); }
+    });
+  }
+  page.hidden = false;
+  byId('app').classList.add('settings-open');
   const shell = el('div', 'settings-shell');
   const nav = el('nav', 'settings-nav');
   nav.setAttribute('aria-label', 'Settings sections');
   const pane = el('div', 'settings-pane');
   shell.append(nav, pane);
-  modal.add(shell);
+  const error = el('p', 'dialog-error settings-error', '');
+  error.setAttribute('role', 'alert');
+  byId('settings-shell').replaceChildren(error, shell);
+  const modal = {
+    busy(value: boolean) { byId('settings-close').toggleAttribute('disabled', value); },
+    fail(value: unknown) { error.textContent = errorText(value); },
+  };
   const controls = new Map<Category, HTMLButtonElement>();
   let active: Category = 'general';
 
@@ -81,7 +105,10 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
         toggle('goalDriven', 'Goal-driven execution', 'Ask the agent to keep working and verifying until the goal is complete or it is blocked.'),
         toggle('homeGame', 'Home screen game', 'Show a small focus game on the empty home screen.'),
         toggle('skillSuggestions', 'Skill evolution suggestions', 'Suggest unused workspace skills after a turn finishes.'),
+        select('Language', 'Switch the interface language. Arabic enables RTL layout.', [['en', 'English'], ['ar', 'العربية — Arabic']], getState().preferences.general.language,
+          value => save({ general: { language: value } }).then(next => { apply(next); applyLanguage(next.preferences.general.language); return next; })),
         toggle('turnNotifications', 'Turn completion notifications', 'Post a macOS notification when a reply finishes while Relay is in the background.'),
+        toggle('requestNotifications', 'Permission & question notifications', 'Post a macOS notification when the agent needs your approval or asks a question — even while Relay is open.'),
         toggle('turnSound', 'In-app finish chime', 'Ring a soft chime when a reply finishes in the chat. The macOS notification takes over in the background, so you never hear both.'),
       ),
       section('Skill suggestions', skillRegistryRow()),
@@ -176,6 +203,57 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       choices.append(card);
     }
     pane.append(section('Appearance', choices, el('p', 'settings-note', 'Relay follows macOS window chrome and switches instantly without reloading the workspace.')));
+    const accents: Array<[Accent, string, string]> = [
+      ['blue', 'Relay Blue', '#abc4ff'], ['emerald', 'Emerald', '#8bf0ba'], ['amber', 'Amber', '#f2c879'],
+      ['rose', 'Rose', '#f6a6b4'], ['violet', 'Violet', '#c5b6fb'], ['cyan', 'Cyan', '#84d7fa'],
+    ];
+    const swatches = el('div', 'accent-swatches');
+    swatches.setAttribute('role', 'radiogroup');
+    swatches.setAttribute('aria-label', 'Accent color');
+    for (const [id, label, dot] of accents) {
+      const swatch = el('button', `accent-swatch${getState().preferences.general.accent === id ? ' active' : ''}`);
+      swatch.type = 'button';
+      swatch.setAttribute('role', 'radio');
+      swatch.setAttribute('aria-checked', String(getState().preferences.general.accent === id));
+      swatch.setAttribute('aria-label', label);
+      const circle = el('span', 'accent-dot');
+      circle.style.background = dot;
+      swatch.append(circle, el('span', 'accent-name', label));
+      swatch.addEventListener('click', () => {
+        swatch.disabled = true;
+        void save({ general: { accent: id } }).then(next => {
+          apply(next);
+          for (const sibling of swatches.children) sibling.classList.toggle('active', sibling === swatch);
+        }).catch(error => modal.fail(error)).finally(() => { swatch.disabled = false; });
+      });
+      swatches.append(swatch);
+    }
+    const layouts: Array<[Layout, string, string]> = [
+      ['tabs', 'Tabs', 'Sidebar, chat and inspector — the full workspace.'],
+      ['inbox', 'Inbox', 'Chat only, full width. No inspector.'],
+      ['focus', 'Focus', 'Zen mode — centered chat, panels hidden.'],
+    ];
+    const layoutChoices = el('div', 'layout-cards');
+    layoutChoices.setAttribute('role', 'radiogroup');
+    layoutChoices.setAttribute('aria-label', 'Layout');
+    for (const [id, label, description] of layouts) {
+      const card = el('button', `layout-card${getState().preferences.general.layout === id ? ' active' : ''}`);
+      card.type = 'button';
+      card.setAttribute('role', 'radio');
+      card.setAttribute('aria-checked', String(getState().preferences.general.layout === id));
+      const preview = el('span', `layout-preview layout-preview-${id}`);
+      preview.append(el('span', 'lp-side'), el('span', 'lp-main'), el('span', 'lp-inspector'));
+      card.append(preview, el('strong', '', label), el('small', '', description));
+      card.addEventListener('click', () => {
+        card.disabled = true;
+        void save({ general: { layout: id } }).then(next => {
+          apply(next);
+          for (const sibling of layoutChoices.children) sibling.classList.toggle('active', sibling === card);
+        }).catch(error => modal.fail(error)).finally(() => { card.disabled = false; });
+      });
+      layoutChoices.append(card);
+    }
+    pane.append(section('Accent & layout', swatches, layoutChoices));
   };
 
   const context = (): void => {
@@ -218,6 +296,82 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       autoRow,
       row,
       el('p', 'settings-note', 'Compaction keeps a summary card in the conversation so you can see what was replaced. Open the usage meter in any task header to compact on demand.'),
+    ));
+  };
+
+  const auto = (): void => {
+    const includeRow = el('label', 'settings-toggle');
+    const includeCopy = el('span', 'settings-copy');
+    includeCopy.append(el('strong', '', 'Include free models'), el('small', '', 'Use free models in auto rotation. Turn off to restrict auto to paid/subscription models.'));
+    const includeInput = el('input');
+    includeInput.type = 'checkbox';
+    includeInput.checked = getState().preferences.auto.includeFree;
+    includeInput.addEventListener('change', () => {
+      includeInput.disabled = true;
+      void save({ auto: { includeFree: includeInput.checked } }).then(apply)
+        .catch(error => { includeInput.checked = getState().preferences.auto.includeFree; modal.fail(error); })
+        .finally(() => { includeInput.disabled = false; });
+    });
+    includeRow.append(includeCopy, includeInput);
+
+    const maxTokens = el('input');
+    maxTokens.type = 'number';
+    maxTokens.min = '256';
+    maxTokens.max = '256000';
+    maxTokens.step = '256';
+    maxTokens.value = String(getState().preferences.auto.maxTokens);
+    const maxRow = el('label', 'settings-toggle');
+    const maxCopy = el('span', 'settings-copy');
+    maxCopy.append(el('strong', '', 'Max tokens per request'), el('small', '', 'Cap the token budget auto mode requests. Lower values avoid credit errors on providers with limited balances.'));
+    const maxNumber = el('span', 'settings-number');
+    maxNumber.append(maxTokens);
+    maxRow.append(maxCopy, maxNumber);
+    maxTokens.addEventListener('change', () => {
+      maxTokens.disabled = true;
+      void save({ auto: { maxTokens: Number(maxTokens.value) } }).then(apply)
+        .catch(error => { maxTokens.value = String(getState().preferences.auto.maxTokens); modal.fail(error); })
+        .finally(() => { maxTokens.disabled = false; });
+    });
+
+    const modelList = el('div', 'auto-model-list');
+    const modelField = el('div', 'field auto-model-field');
+    modelField.append(el('span', 'field-label', 'Allowed models'), modelList,
+      el('small', '', 'Check or uncheck connected models. All checked = every connected model (the default). Auto rotates through the checked models in cost order.'));
+    const renderAllowedModels = async (): Promise<void> => {
+      modelList.replaceChildren(el('p', 'small muted', 'Loading models…'));
+      const models = await window.relay.listModels().catch(() => [] as ModelOption[]);
+      const connected = models.filter(item => item.connected);
+      if (!connected.length) {
+        modelList.replaceChildren(el('p', 'small muted', 'No connected models yet — configure a provider first.'));
+        return;
+      }
+      const saved = getState().preferences.auto.modelIds;
+      const current = (): Set<string> => new Set(getState().preferences.auto.modelIds.length ? getState().preferences.auto.modelIds : connected.map(item => item.id));
+      modelList.replaceChildren(...connected.map(item => {
+        const row = el('label', 'auto-model-row');
+        const copy = el('span', 'auto-model-copy');
+        copy.append(el('strong', '', item.name), el('small', '', `${item.id}${item.free ? ' · free' : ''}${item.limited ? ' · limit reached' : ''}`));
+        const input = el('input');
+        input.type = 'checkbox';
+        input.checked = saved.length ? saved.includes(item.id) : true;
+        input.setAttribute('aria-label', `Include ${item.name}`);
+        input.addEventListener('change', () => {
+          const next = current();
+          if (input.checked) next.add(item.id); else next.delete(item.id);
+          const list = next.size === connected.length ? [] : [...next];
+          void save({ auto: { modelIds: list } }).catch(modal.fail);
+        });
+        row.append(input, copy);
+        return row;
+      }));
+    };
+    void renderAllowedModels();
+
+    pane.append(section('Auto model rotation',
+      includeRow,
+      maxRow,
+      modelField,
+      el('p', 'settings-note', 'Auto mode picks the lowest-cost connected model and rotates to the next one when a request fails (rate limits, credits, or invalid models). Use the allowed list to restrict which models may be tried.'),
     ));
   };
 
@@ -317,6 +471,13 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     const formTitle = el('h3', '', '');
     form.append(formTitle);
     const description = el('p', 'muted');
+    const keyLink = el('button', 'text-button', 'Get an API key ↗');
+    keyLink.type = 'button';
+    keyLink.hidden = true;
+    keyLink.addEventListener('click', () => {
+      const preset = providerPreset(activeProvider);
+      if (preset?.keyUrl) void window.relay.openExternal(preset.keyUrl).catch(error => report('Could not open link', error));
+    });
     const key = el('input'); key.type = 'password'; key.autocomplete = 'new-password'; key.spellcheck = false;
     const baseURL = el('input'); baseURL.type = 'url'; baseURL.spellcheck = false;
     const models = el('textarea'); models.rows = 2; models.spellcheck = false;
@@ -335,6 +496,8 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       formTitle.textContent = `Configure ${providerName(id)}`;
       key.value = ''; baseURL.value = saved?.baseURL ?? ''; models.value = (saved?.models ?? []).join('\n');
       description.textContent = preset?.description ?? '';
+      keyLink.hidden = !preset?.keyUrl;
+      keyLink.textContent = preset?.keyUrl ? `Get an API key for ${preset.name} ↗` : '';
       presence.textContent = saved?.hasKey ? 'Key present · enter a new key only to replace it' : preset?.keyless ? 'No key needed' : 'No key stored';
       key.placeholder = preset?.keyless ? 'Optional API key' : 'Enter API key';
       keyField.hidden = id === 'custom';
@@ -376,9 +539,8 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       })().catch(modal.fail).finally(() => busy(false));
     });
     actions.append(remove, saveButton);
-    form.append(description, keyField, baseField, modelField, actions, status);
+    form.append(description, keyLink, keyField, baseField, modelField, actions, status);
     pane.append(form, button('Refresh available models', async () => { try { await refreshModels(); status.textContent = 'Model list refreshed from the engine.'; } catch (error) { modal.fail(error); } }, 'text-button'));
-    modal.root.addEventListener('close', () => { key.value = ''; }, { once: true });
   };
 
   const archive = (): void => {
@@ -419,7 +581,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     pane.append(section('About Relay', rows, el('p', 'settings-note', 'Relay is a local-first agent workspace. Conversations, settings, and provider keys stay on this Mac; provider requests go through the local OpenCode engine.')));
   };
 
-  const builders: Record<Category, () => void> = { general, appearance, context, voice, providers, archive, about };
+  const builders: Record<Category, () => void> = { general, appearance, context, auto, voice, providers, archive, about };
 
   const show = (category: Category): void => {
     active = category;
@@ -433,11 +595,42 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     builders[category]();
   };
 
+  const NAV_ICONS: Record<Category, string[]> = {
+    general: ['<circle cx="12" cy="12" r="3.2"/>', '<path d="M12 3.5v2.6M12 17.9v2.6M20.5 12h-2.6M6.1 12H3.5M17.8 6.2 16 8M8 16l-1.8 1.8M17.8 17.8 16 16M8 8 6.2 6.2"/>'],
+    appearance: ['<path d="M20 13.5A8 8 0 0 1 10.5 4a8 8 0 1 0 9.5 9.5z"/>'],
+    context: ['<path d="M4.5 14.5a8 8 0 1 1 15 0"/>', '<path d="M12 14.5 15.5 9"/>', '<circle cx="12" cy="14.5" r="1.4"/>'],
+    auto: ['<path d="M12 4l1.4 3.6L17 9l-3.6 1.4L12 14l-1.4-3.6L7 9l3.6-1.4L12 4z"/>', '<path d="M18.2 13.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6.6-1.6z"/>'],
+    voice: ['<rect x="9" y="3" width="6" height="11" rx="3"/>', '<path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>'],
+    providers: ['<path d="M9 4v5M15 4v5M7 9h10v3a5 5 0 0 1-10 0V9zM12 17v3"/>'],
+    archive: ['<rect x="4" y="5" width="16" height="5" rx="1.5"/>', '<path d="M6 10v7a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-7M10.5 13.5h3"/>'],
+    about: ['<circle cx="12" cy="12" r="8.5"/>', '<path d="M12 11v5"/>', '<circle cx="12" cy="8.2" r=".6" fill="currentColor" stroke="none"/>'],
+  };
+  const navIcon = (category: Category): SVGSVGElement => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24');
+    svg.setAttribute('width', '16');
+    svg.setAttribute('height', '16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.6');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.classList.add('settings-nav-icon');
+    for (const fragment of NAV_ICONS[category]) {
+      const template = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      template.innerHTML = fragment;
+      for (const node of [...template.childNodes]) svg.append(node);
+    }
+    return svg;
+  };
+
   for (const group of navigation) {
     nav.append(el('div', 'section-label', group.group));
     for (const item of group.items) {
-      const control = button(item.label, () => show(item.id), 'settings-nav-item');
+      const control = button('', () => show(item.id), 'settings-nav-item');
       control.setAttribute('role', 'tab');
+      control.append(navIcon(item.id), el('span', 'settings-nav-label', item.label));
       controls.set(item.id, control);
       nav.append(control);
     }

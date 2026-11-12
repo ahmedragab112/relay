@@ -1,8 +1,8 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
-import type { ChatMessage, MessageReaction, ToolPart } from '../shared/contracts';
+import type { ChatMessage, MessageReaction, TextPart, ToolPart } from '../shared/contracts';
 import { byId, button, el, report } from './dom';
-import { externalURL, nearBottom } from './state';
+import { externalURL, imageSrc, nearBottom } from './state';
 import { ThinkingIndicator } from './thinking';
 import { activityOf, toolStateLabel, type ThinkingActivity } from './thinking-text';
 import { groupMessages, groupText, lastAssistantIndex, replyBlocks, type MessageGroup } from './message-groups';
@@ -13,6 +13,7 @@ import { formatClock, workSummary } from './turn-time';
 
 export interface ChatActions {
   copy: (value: string) => Promise<void>;
+  summary: (value: string) => Promise<void>;
   react: (messageId: string, reaction: MessageReaction | null) => Promise<void>;
   fork: (messageId: string) => Promise<void>;
   addContext: (label: string, text: string) => boolean;
@@ -25,6 +26,12 @@ const ICONS: Record<string, IconShape[]> = {
   copy: [
     { tag: 'rect', attrs: { x: '9', y: '9', width: '11', height: '11', rx: '2' } },
     { tag: 'path', attrs: { d: 'M5 15V6a2 2 0 0 1 2-2h8' } },
+  ],
+  summary: [
+    { tag: 'path', attrs: { d: 'M6 4h12v16H6z' } },
+    { tag: 'path', attrs: { d: 'M9.5 9h5' } },
+    { tag: 'path', attrs: { d: 'M9.5 12.5h5' } },
+    { tag: 'path', attrs: { d: 'M9.5 16h3' } },
   ],
   like: [
     { tag: 'path', attrs: { d: 'M7 10.5V20H4.5A1.5 1.5 0 0 1 3 18.5v-6.5A1.5 1.5 0 0 1 4.5 10.5H7Z' } },
@@ -68,8 +75,8 @@ function markdown(text: string): HTMLElement {
   // Images, forms, styles and active content are deliberately not part of chat.
   const fragment = DOMPurify.sanitize(marked.parse(text, { async: false }), {
     RETURN_DOM_FRAGMENT: true,
-    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li', 'pre', 'code', 'h1', 'h2', 'h3', 'h4', 'hr', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
-    ALLOWED_ATTR: ['href', 'title', 'start'],
+    ALLOWED_TAGS: ['p', 'br', 'strong', 'em', 'del', 'blockquote', 'ul', 'ol', 'li', 'pre', 'code', 'h1', 'h2', 'h3', 'h4', 'hr', 'a', 'table', 'thead', 'tbody', 'tr', 'th', 'td', 'img'],
+    ALLOWED_ATTR: ['href', 'title', 'start', 'src', 'alt', 'width', 'height'],
     ALLOW_DATA_ATTR: false,
     ALLOW_ARIA_ATTR: false,
   });
@@ -78,6 +85,21 @@ function markdown(text: string): HTMLElement {
     const safe = externalURL(link.getAttribute('href') ?? '');
     if (safe) { link.href = safe; link.rel = 'noreferrer noopener'; }
     else link.removeAttribute('href');
+  }
+  // Render generated images with a ChatGPT-style shimmer placeholder until loaded.
+  for (const image of [...node.querySelectorAll<HTMLImageElement>('img')]) {
+    const safe = imageSrc(image.getAttribute('src') ?? '');
+    if (!safe) { image.remove(); continue; }
+    image.src = safe;
+    image.loading = 'lazy';
+    image.decoding = 'async';
+    image.classList.add('generated-image-img');
+    const wrap = document.createElement('div');
+    wrap.className = 'generated-image';
+    image.addEventListener('load', () => wrap.classList.add('loaded'), { once: true });
+    image.addEventListener('error', () => wrap.classList.add('failed'), { once: true });
+    image.parentNode?.replaceChild(wrap, image);
+    wrap.append(image);
   }
   return node;
 }
@@ -329,6 +351,13 @@ export class ChatView {
     if (role === 'system') { this.renderCompaction(root, group.messages[0], open); return; }
     const meta = el('div', 'message-meta');
     meta.append(el('span', `avatar ${role === 'assistant' ? 'agent' : ''}`, role === 'user' ? 'Y' : 'R'), el('span', '', role === 'user' ? 'You' : 'Relay'));
+    const modelMessage = role === 'assistant' ? group.messages.find(message => message.model) : undefined;
+    if (modelMessage?.model) {
+      const modelText = modelMessage.modelVariant ? `${modelMessage.model} · ${modelMessage.modelVariant}` : modelMessage.model;
+      const modelSpan = el('span', 'message-model', modelText);
+      modelSpan.title = 'Model used for this reply';
+      meta.append(modelSpan);
+    }
     const date = new Date(group.createdAt);
     if (!Number.isNaN(date.getTime())) {
       const time = el('time', '', date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
@@ -432,12 +461,8 @@ export class ChatView {
   }
 
   private suggestions(group: MessageGroup, open: Set<string | undefined>, userText: string): HTMLElement {
-    const key = `suggestions:${group.id}`;
-    const detail = el('details', 'reply-suggestions');
-    detail.dataset.part = key;
-    detail.open = open.has(key);
-    const summary = el('summary', 'suggestion-toggle');
-    summary.append(el('span', 'dotted-rule'), el('span', 'suggestion-label', '✦ Follow-ups'), el('span', 'dotted-rule'), el('span', 'disclosure', '›'));
+    const wrap = el('div', 'reply-suggestions');
+    wrap.append(el('span', 'suggestion-divider'));
     const list = el('div', 'suggestion-chips');
     const tools = group.messages.flatMap(message => message.parts).filter((part): part is ToolPart => part.type === 'tool');
     for (const suggestion of followUpSuggestions({ userText, replyText: groupText(group), tools })) {
@@ -454,8 +479,8 @@ export class ChatView {
       chip.title = `Send: ${suggestion}`;
       list.append(chip);
     }
-    detail.append(summary, list);
-    return detail;
+    wrap.append(list);
+    return wrap;
   }
 
   private actionBar(group: MessageGroup, parts: HTMLElement[]): HTMLElement {
@@ -467,6 +492,10 @@ export class ChatView {
     const like = this.actionButton('Like response', 'like', async () => { await this.react(target, 'like', like, dislike); });
     const dislike = this.actionButton('Dislike response', 'like', async () => { await this.react(target, 'dislike', dislike, like); }, false, true);
     const fork = this.actionButton('Branch into a new task', 'fork', async () => { await this.actions.fork(target.id); });
+    const summary = this.actionButton('Copy chat summary', 'summary', async () => {
+      const text = this.buildSummary();
+      if (text) await this.actions.summary(text);
+    }, !this.lastMessages.length);
     const more = this.actionButton('More actions', 'more', () => {
       if (this.menuAnchor === more) { this.closeMenu(); return; }
       this.openMenu(more, [
@@ -484,7 +513,7 @@ export class ChatView {
       dislike.setAttribute('aria-pressed', String(value === 'dislike'));
     };
     applyReaction(target.reaction);
-    bar.append(copy, like, dislike, fork, more);
+    bar.append(copy, like, dislike, fork, summary, more);
     return bar;
   }
 
@@ -495,6 +524,21 @@ export class ChatView {
     control.disabled = disabled;
     control.append(icon(name, flip));
     return control;
+  }
+
+  private buildSummary(): string {
+    const lines: string[] = ['# Relay chat summary'];
+    for (const message of this.lastMessages) {
+      if (message.role === 'system') continue;
+      const text = message.parts
+        .filter(part => part.type === 'text')
+        .map(part => (part as TextPart).text)
+        .join('\n')
+        .trim();
+      if (!text) continue;
+      lines.push(`${message.role === 'user' ? 'You' : 'Relay'}: ${text}`);
+    }
+    return lines.join('\n\n').slice(0, 4000);
   }
 
   private labelTime(message: ChatMessage): string {

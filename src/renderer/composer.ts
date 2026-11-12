@@ -1,4 +1,4 @@
-import type { AccessLevel, CommandOption, ContextBlock, EngineStatus, ModelOption, Preferences, QueuedMessage, SessionSummary, SkillOption } from '../shared/contracts';
+import type { AccessLevel, AutoSettings, CommandOption, ContextBlock, EngineStatus, ModelOption, Preferences, QueuedMessage, SessionSummary, SkillOption } from '../shared/contracts';
 import { byId, button, el, errorText, notify, report } from './dom';
 import { dialog } from './dialog';
 import { chooseModel } from './state';
@@ -44,6 +44,8 @@ export class Composer {
   private preferenceSaving = false;
   private preferredVariant = '';
   private freeOnly = false;
+  private autoModel = false;
+  private autoSettings: AutoSettings = { includeFree: true, maxTokens: 4096, modelIds: [] };
   private inputWhileRunning = false;
   private commandDetail = false;
   private goalDrivenByDefault = false;
@@ -93,6 +95,10 @@ export class Composer {
       this.access.dataset.access = this.access.value;
       const value = this.access.value as AccessLevel;
       this.persistPreference({ defaultAccess: value }, 'Access level was not saved. Choose it again to retry');
+      const session = this.session;
+      if (!session) return;
+      void window.relay.setSessionAccess(session.id, value)
+        .catch(error => report('Access level did not reach the running task', error));
     });
     this.free.addEventListener('click', () => {
       this.freeOnly = !this.freeOnly;
@@ -134,6 +140,7 @@ export class Composer {
   private pickModel(id: string): void {
     const model = this.models.find(item => item.id === id);
     if (!model || !model.connected) return;
+    this.autoModel = false;
     const changed = this.modelId !== id;
     this.modelId = id;
     if (changed) this.preferredVariant = resolveVariant(model.variants, this.preferredVariant);
@@ -145,6 +152,19 @@ export class Composer {
     this.sync();
     if (changed) this.persistPreference({ defaultModel: id }, 'Model preference was not saved. Choose the model again to retry');
     if (!model.variants?.length || !changed) this.closeModelMenu();
+  }
+
+  private pickAuto(): void {
+    this.autoModel = true;
+    this.modelId = '';
+    this.renderModelLabel();
+    if (this.modelMenuOpen) {
+      this.renderModelMenu();
+      this.modelMenu.querySelector<HTMLElement>('.model-option.selected')?.focus();
+    }
+    this.sync();
+    this.closeModelMenu();
+    this.modelButton.focus();
   }
 
   private pickPower(id: string, variant: string): void {
@@ -169,6 +189,7 @@ export class Composer {
     this.inputWhileRunning = preferences.general.inputWhileRunning;
     this.commandDetail = preferences.general.slashCommandDisplay;
     this.goalDrivenByDefault = preferences.general.goalDriven;
+    this.autoSettings = preferences.auto;
     this.renderModelLabel(); this.renderCommands();
     this.sync();
   }
@@ -266,6 +287,7 @@ export class Composer {
   }
 
   private renderModelLabel(): void {
+    if (this.autoModel) { this.modelLabel.textContent = 'Auto (best available)'; return; }
     const selected = this.models.find(model => model.id === this.modelId);
     if (!selected) {
       this.modelLabel.textContent = this.freeOnly ? 'No free models' : 'Configure model';
@@ -284,6 +306,16 @@ export class Composer {
       return;
     }
     const rows: HTMLElement[] = [];
+    // Auto entry at the top: Relay picks the best available model and rotates away from limits.
+    const autoEntry = el('div', `model-entry${this.autoModel ? ' selected' : ''}`);
+    const autoRow = button('', () => this.pickAuto(), `model-option${this.autoModel ? ' selected' : ''}`);
+    autoRow.type = 'button';
+    autoRow.setAttribute('role', 'option');
+    autoRow.setAttribute('aria-selected', String(this.autoModel));
+    autoRow.append(el('span', 'truncate', 'Auto (best available)'));
+    autoRow.append(el('span', 'pill', 'Lowest cost'));
+    autoEntry.append(autoRow);
+    rows.push(autoEntry);
     for (const group of groups) {
       rows.push(el('p', 'model-group-label', group.label));
       for (const model of group.models) rows.push(this.modelEntry(model));
@@ -302,6 +334,7 @@ export class Composer {
     row.append(el('span', 'truncate', model.name));
     if (model.free) row.append(el('span', 'pill', 'Free'));
     if (model.context) row.append(el('span', 'pill', `${Math.round(model.context / 1000)}k`));
+    if (model.limited) row.append(el('span', 'pill limit-pill', 'Limit reached'));
     entry.append(row);
     const active = this.resolvedVariant();
     if (model.variants?.length) {
@@ -622,7 +655,7 @@ export class Composer {
     if (this.modelButton.disabled) this.closeModelMenu();
     this.access.disabled = this.preferenceSaving;
     this.free.disabled = !this.models.some(model => model.free);
-    this.send.disabled = !ready || !this.modelId || (!this.input.value.trim() && !this.command) || blocked;
+    this.send.disabled = !ready || (!this.autoModel && !this.modelId) || (!this.input.value.trim() && !this.command) || blocked;
     this.interrupt.hidden = !running;
     this.interrupt.disabled = this.stopping.has(id) || !this.ready;
     this.send.hidden = running && !this.inputWhileRunning;
@@ -651,9 +684,11 @@ export class Composer {
     this.closeMenu(); this.clearSkillSuggestions();
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.sync();
     try {
-      if (command) await window.relay.runCommand({ sessionId: id, name: command, text, model, variant, access, files, skills });
+      if (command) await window.relay.runCommand({ sessionId: id, name: command, text, model: this.autoModel ? '' : model, variant, access, files, skills });
       else await window.relay.sendMessage({
-        sessionId: id, text, files, variant, access, model, skills,
+        sessionId: id, text, files, variant, access, model: this.autoModel ? '' : model, skills,
+        auto: this.autoModel,
+        autoSettings: this.autoModel ? this.autoSettings : undefined,
         goalDriven: this.goalDrivenByDefault,
         ...(planOnly ? { planOnly } : {}),
         ...(agents.length ? { agents } : {}),

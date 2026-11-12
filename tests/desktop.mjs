@@ -179,6 +179,7 @@ assert.match(await text('#task-list'), /New task/);
 assert.equal(await text('#task-title'), 'New task');
 assert.equal(await page.evaluate(() => document.querySelector('#tab-activity')?.getAttribute('aria-selected')), 'true', 'a new task did not open the Activity tab by default');
 assert.equal(await page.locator('#activity-panel').isVisible(), true);
+assert.equal(await page.locator('#tab-browser').isVisible(), false, 'the web tab should stay hidden until a page is opened');
 const likedSession = (await page.evaluate(async () => window.relay.listSessions()))[0].id;
 
 console.log('Sending a message to the test model');
@@ -208,9 +209,13 @@ await waitFor(() => document.querySelector('#model-menu')?.hidden === true, 10_0
 assert.match(await text('#model-label'), /test-model/);
 assert.equal(await page.locator('#model-button').getAttribute('aria-expanded'), 'false');
 
+console.log('A manual tab choice is respected, then a new turn takes the view back');
+await page.click('#tab-files');
+await waitFor(() => document.querySelector('#tab-files')?.getAttribute('aria-selected') === 'true');
 await page.fill('#prompt', 'Say hello.');
 await page.click('#send-message');
 await waitFor(() => /Hello from the test model\./.test(document.querySelector('#conversation')?.textContent ?? ''), 40_000);
+await waitFor(() => document.querySelector('#tab-activity')?.getAttribute('aria-selected') === 'true', 20_000);
 const assistant = page.locator('#conversation article.assistant-message').last();
 await assistant.waitFor();
 await assistant.hover();
@@ -388,27 +393,24 @@ await waitFor(() => document.querySelector('#thinking')?.hidden === true, 45_000
 await waitFor(() => document.querySelectorAll('#queued-messages .queued-message').length === 0, 10_000);
 
 console.log('Offering follow-up suggestions only under the latest reply');
-await page.waitForFunction(() => document.querySelectorAll('#conversation article.assistant-message details.reply-suggestions').length > 0, undefined, { timeout: 20_000 });
+await page.waitForFunction(() => document.querySelectorAll('#conversation article.assistant-message .reply-suggestions').length > 0, undefined, { timeout: 20_000 });
 const anchoredToLastReply = await page.evaluate(() => {
   const replies = Array.from(document.querySelectorAll('#conversation article.assistant-message'));
-  const sections = Array.from(document.querySelectorAll('#conversation article.assistant-message details.reply-suggestions'));
+  const sections = Array.from(document.querySelectorAll('#conversation article.assistant-message .reply-suggestions'));
   const last = replies[replies.length - 1];
   return { replies: replies.length, sections: sections.length, onLast: replies.length > 1 && sections.length === 1 && last?.contains(sections[0] ?? null) };
 });
 assert.equal(anchoredToLastReply.sections, 1, 'follow-up suggestions appeared under more than the latest reply');
 assert.ok(anchoredToLastReply.onLast, 'follow-up suggestions were not attached to the latest reply');
-const suggestions = page.locator('#conversation article.assistant-message details.reply-suggestions').first();
-assert.equal(await suggestions.locator('.suggestion-toggle .dotted-rule').count(), 2);
-assert.match(await suggestions.locator('.suggestion-toggle').textContent(), /Follow-ups/);
-await suggestions.locator('.suggestion-toggle').click();
-await waitFor(() => document.querySelector('article.assistant-message details.reply-suggestions')?.open === true);
+const suggestions = page.locator('#conversation article.assistant-message .reply-suggestions').first();
+await waitFor(() => document.querySelectorAll('article.assistant-message .reply-suggestions .suggestion-chip').length > 0);
 const suggestion = (await suggestions.locator('.suggestion-chip').first().textContent() ?? '').trim();
 assert.ok(suggestion.length > 0, 'no follow-up suggestion was offered');
 await suggestions.locator('.suggestion-chip').first().click();
 await page.waitForFunction((expected) => Array.from(document.querySelectorAll('#conversation article.user-message .user-text')).some(node => node.textContent?.trim() === expected), suggestion, { timeout: 20_000 });
 await page.waitForFunction(() => {
   const replies = Array.from(document.querySelectorAll('#conversation article.assistant-message'));
-  const sections = Array.from(document.querySelectorAll('#conversation article.assistant-message details.reply-suggestions'));
+  const sections = Array.from(document.querySelectorAll('#conversation article.assistant-message .reply-suggestions'));
   return sections.length === 1 && replies[replies.length - 1]?.contains(sections[0] ?? null);
 }, undefined, { timeout: 40_000 });
 
@@ -551,6 +553,22 @@ await page.evaluate((sessionId) => window.relay.sendMessage({
   sessionId, text: 'relay-tool read the README', model: 'custom::test-model', variant: '', access: 'ask', files: [], skills: [],
 }), approvalSession);
 await waitFor(() => document.querySelector('#requests .request-card') !== null, 60_000);
+console.log('The composer steps aside while the agent waits on an approval');
+assert.equal(await page.locator('.composer-wrap').isVisible(), false, 'the typing field should hide while an approval is pending');
+assert.equal(await page.evaluate(() => document.querySelector('.chat').classList.contains('awaiting-input')), true);
+const awaiting = page.locator('.awaiting-note');
+await awaiting.waitFor();
+await page.screenshot({ path: join(artifacts, 'awaiting-input.png') });
+await awaiting.locator('button', { hasText: 'Type anyway' }).click();
+assert.equal(await page.locator('.composer-wrap').isVisible(), true, 'Type anyway should bring the typing field back');
+assert.equal(await page.evaluate(() => document.querySelector('.chat').classList.contains('awaiting-input')), false);
+console.log('Changing the access level reaches the running task');
+await page.selectOption('#access-select', 'full');
+await page.waitForTimeout(750);
+assert.doesNotMatch(await page.locator('#notice-text').textContent(), /Access level did not reach/);
+assert.equal(await page.locator('#requests .request-card').isVisible(), true, 'a prompt already on screen stays until it is answered');
+await page.selectOption('#access-select', 'ask');
+await page.waitForTimeout(500);
 await waitFor(() => {
   const count = document.querySelector('#attention-button .attention-count');
   return count !== null && !count.hidden && Number(count.textContent) >= 1;
@@ -881,18 +899,18 @@ assert.match(await text('dialog[aria-label="Search tasks and commands"]'), /New 
 assert.match(await text('dialog[aria-label="Search tasks and commands"]'), /Open terminal/);
 await page.keyboard.press('Escape');
 await page.click('#settings-button');
-await waitFor(() => document.querySelector('dialog[aria-label="Settings"]') !== null);
-const settings = page.locator('dialog[aria-label="Settings"]');
+await waitFor(() => document.querySelector('.settings-page')?.hidden === false);
+const settings = page.locator('.settings-page');
 assert.match(await settings.locator('.settings-pane').textContent(), /Input while running/);
 assert.match(await settings.locator('.settings-pane').textContent(), /Turn completion notifications/);
-assert.equal(await settings.locator('.settings-nav-item').count(), 7);
+assert.equal(await settings.locator('.settings-nav-item').count(), 8);
 await settings.getByRole('tab', { name: 'Appearance' }).click();
 await settings.locator('.theme-card.light').click();
 await waitFor(() => document.documentElement.dataset.theme === 'light');
 await page.screenshot({ path: join(artifacts, 'light.png') });
 await settings.getByRole('tab', { name: 'Context & usage' }).click();
 assert.match(await settings.locator('.settings-pane').textContent(), /Auto-compact long conversations/);
-await settings.locator('button[aria-label="Close dialog"]').click();
+await settings.locator('button[aria-label="Close settings"]').click();
 
 console.log('Searching file contents and previewing a diff on focus');
 await page.click('#conversation');
@@ -923,7 +941,11 @@ await waitFor(() => /Removed notes\.md\./.test(document.querySelector('#notice-t
 await assert.rejects(readFile(join(project, 'notes.md'), 'utf8'));
 
 console.log('Opening a live page in the embedded browser');
-await page.click('#tab-browser');
+await page.click('#palette-button');
+await waitFor(() => document.querySelector('dialog[aria-label="Search tasks and commands"]') !== null);
+await page.locator('dialog[aria-label="Search tasks and commands"] .palette-option', { hasText: 'Open in-app browser' }).click();
+await waitFor(() => document.querySelector('#tab-browser')?.hidden === false, 20_000);
+assert.equal(await page.locator('#tab-browser').getAttribute('aria-selected'), 'true', 'opening the browser did not reveal and select its tab');
 await page.fill('#browser-url', `${previewURL}/page`);
 await page.press('#browser-url', 'Enter');
 await waitFor(() => /Relay Preview/.test(document.querySelector('#browser-status')?.textContent ?? ''), 20_000);
@@ -932,8 +954,8 @@ await page.screenshot({ path: join(artifacts, 'browser.png') });
 
 console.log('Creating an automation from the prompt scheduler');
 await page.click('#automation-button');
-await waitFor(() => document.querySelector('dialog[aria-label="Create automation"]') !== null);
-const automation = page.locator('dialog[aria-label="Create automation"]');
+await waitFor(() => document.querySelector('.automation-page')?.hidden === false);
+const automation = page.locator('.automation-page');
 await automation.getByLabel('Objective').waitFor();
 await automation.getByLabel('Context').waitFor();
 await automation.getByLabel('Steps').waitFor();
@@ -947,13 +969,13 @@ assert.equal(await automation.getByLabel('Objective').isVisible(), false);
 await automation.getByLabel('Name').fill('Preview check');
 await automation.getByLabel('Page address').fill(`${previewURL}/dashboard`);
 await automation.locator('button', { hasText: 'Create automation' }).click();
-await waitFor(() => /Preview check/.test(document.querySelector('dialog[aria-label="Create automation"]')?.textContent ?? ''), 20_000);
+await waitFor(() => /Preview check/.test(document.querySelector('.automation-page')?.textContent ?? ''), 20_000);
 assert.match(await text('.automation-row'), /Opens 127\.0\.0\.1/);
 await automation.locator('.automation-row', { hasText: 'Preview check' }).locator('button', { hasText: 'Run now' }).click();
 await waitFor(() => /Completed/.test(document.querySelector('.automation-run')?.textContent ?? ''), 20_000);
 assert.match(await text('.automation-run'), /Completed/);
 await page.screenshot({ path: join(artifacts, 'automation.png') });
-await page.locator('dialog[aria-label="Create automation"] button[aria-label="Close dialog"]').click();
+await page.locator('.automation-page button[aria-label="Close automation"]').click();
 
 console.log('Recording and transcribing a voice dictation');
 await page.fill('#prompt', '');

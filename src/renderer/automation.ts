@@ -1,6 +1,6 @@
 import type { AccessLevel, AutomationAction, AutomationInput, AutomationJob, AutomationState, JobSchedule, ModelOption } from '../shared/contracts';
-import { button, el, field, option } from './dom';
-import { confirmAction, dialog } from './dialog';
+import { byId, button, el, errorText, field, option } from './dom';
+import { confirmAction } from './dialog';
 import { normalizeAddress } from './browser';
 
 const accessLevels: Array<[AccessLevel, string]> = [
@@ -50,9 +50,33 @@ function actionLabel(action: AutomationAction): string {
   return `${output} · ${access}`;
 }
 
+let automationWired = false;
+let automationUnsubscribe: (() => void) | undefined;
+
+export function closeAutomation(): void {
+  byId('automation-shell').replaceChildren();
+  byId('automation-page').hidden = true;
+  byId('app').classList.remove('automation-open');
+  automationUnsubscribe?.();
+  automationUnsubscribe = undefined;
+  byId('automation-button').focus();
+}
+
 export function showAutomation(openSession: (id: string) => void | Promise<void>): void {
-  const modal = dialog('Create automation');
-  modal.root.classList.add('automation-dialog');
+  const page = byId('automation-page');
+  if (!automationWired) {
+    automationWired = true;
+    byId('automation-close').addEventListener('click', () => closeAutomation());
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape' && !page.hidden) { event.preventDefault(); closeAutomation(); }
+    });
+  }
+  page.hidden = false;
+  byId('app').classList.add('automation-open');
+  const modal = {
+    busy(value: boolean) { byId('automation-close').toggleAttribute('disabled', value); },
+    fail(value: unknown) { error.textContent = errorText(value); },
+  };
   const list = el('div', 'automation-list');
   const history = el('div', 'automation-history');
   const status = el('p', 'small muted');
@@ -347,7 +371,7 @@ export function showAutomation(openSession: (id: string) => void | Promise<void>
       const actions = el('div', 'automation-run-actions');
       if (run.sessionId) {
         const sessionId = run.sessionId;
-        actions.append(button('Open task', () => { modal.root.close(); void openSession(sessionId); }, 'text-button'));
+        actions.append(button('Open task', () => { closeAutomation(); void openSession(sessionId); }, 'text-button'));
       }
       if (job && run.status === 'ok' && job.artifactPath && job.lastRun === run.startedAt) {
         let outputButton: HTMLButtonElement | undefined;
@@ -405,14 +429,18 @@ export function showAutomation(openSession: (id: string) => void | Promise<void>
     void perform(submit, () => save(input));
   });
 
-  modal.add(
+  const error = el('p', 'dialog-error settings-error', '');
+  error.setAttribute('role', 'alert');
+  const shell = el('div', 'automation-shell');
+  shell.append(
     el('p', 'small muted', 'Run an agent prompt or open an internal page on a schedule. Jobs run while Relay is open.'),
     list, history, form, status,
   );
-  const unsubscribe = window.relay.onEvent(event => {
+  byId('automation-shell').replaceChildren(error, shell);
+  automationUnsubscribe?.();
+  automationUnsubscribe = window.relay.onEvent(event => {
     if (event.type === 'automation') render({ jobs: event.jobs, runs: event.runs });
   });
-  modal.root.addEventListener('close', () => unsubscribe(), { once: true });
 
   syncAction();
   syncSchedule();

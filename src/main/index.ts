@@ -21,6 +21,7 @@ import { SkillCatalog } from './skills-catalog.js';
 import { WorkspaceFiles } from './workspace.js';
 import { accentColor, applicationMenu, credentialStoreLabel, windowChrome, windowMaterial, type Platform } from './platform.js';
 import { engineBinaryName } from '../shared/engine-target.js';
+import { startControlServer } from './control.js';
 
 let window: BrowserWindow | undefined;
 let store: SettingsStore;
@@ -97,8 +98,30 @@ function prepareBrowserSession(): void {
 }
 
 function emit(event: AppEvent): void {
-  const delivered = event.type === 'session-idle' ? finishEvent(event) : event;
+  let delivered: AppEvent = event;
+  if (event.type === 'session-idle') delivered = finishEvent(event);
+  else if (event.type === 'permission' || event.type === 'question') requestNotify(event);
   if (window && !window.isDestroyed()) window.webContents.send('app:event', delivered);
+}
+
+// A permission or question blocks the agent — surface it as a macOS notification so the
+// user notices even when Relay is in the background. Own setting: requestNotifications.
+function requestNotify(event: Extract<AppEvent, { type: 'permission' } | { type: 'question' }>): void {
+  const general = store?.preferences.general;
+  if (!general?.requestNotifications || !Notification.isSupported()) return;
+  const sessionId = event.type === 'permission' ? event.request.sessionId : event.request.sessionId;
+  const note = new Notification({
+    title: event.type === 'permission' ? 'Relay needs permission' : 'Relay has a question',
+    body: event.type === 'permission'
+      ? `The agent is asking for approval: ${event.request.permission}${event.request.detail ? ` — ${String(event.request.detail).slice(0, 140)}` : ''}`
+      : `The agent asked: ${event.request.questions[0]?.question ?? 'a question'}`.slice(0, 160),
+  });
+  note.on('click', () => {
+    window?.show();
+    window?.focus();
+    emit({ type: 'open-session', sessionId });
+  });
+  note.show();
 }
 
 // One alert per finished turn: the system notification owns the sound in the background,
@@ -277,10 +300,14 @@ function register(): void {
       agents: Array.isArray(input.agents) ? input.agents.slice(0, 10).map((agent) => text(agent, 'Agent', 128)) : [],
       context,
       planOnly: input.planOnly === true,
+      goalDriven: input.goalDriven === true,
+      auto: input.auto === true,
+      autoSettings: input.autoSettings,
       ...(input.delivery === 'steer' || input.delivery === 'queue' ? { delivery: input.delivery } : {}),
     });
   });
   define('sessions:abort', async (_event, id) => needEngine().abortSession(identifier(id)));
+  define('sessions:access', async (_event, id, access) => needEngine().setSessionAccess(identifier(id), accessOf(access)));
   define('sessions:inbox', async (_event, id) => needEngine().listQueuedMessages(identifier(id)));
   define('sessions:inbox-remove', async (_event, id, inboxId) => needEngine().removeQueuedMessage(identifier(id), identifier(inboxId)));
   define('sessions:inbox-steer', async (_event, id, inboxId) => needEngine().steerQueuedMessage(identifier(id), identifier(inboxId)));
@@ -570,6 +597,41 @@ async function boot(): Promise<void> {
   await createWindow();
   scheduler.start();
   await restart();
+  try {
+    await startControlServer({
+      root, version: app.getVersion(), emit,
+      listTasks: async () => (await engine.listSessions()).map(item => ({ id: item.id, title: item.title, status: item.status })),
+      listSkills: async () => (await engine.listSkills()).map(item => ({ id: item.id, name: item.name, description: item.description })),
+      installSkill: async (url, sha256) => {
+        const preview = await skillLibrary.previewURL(url, sha256);
+        if (!preview.skills.length) throw new Error('No installable skill found at that URL.');
+        const installed = await skillLibrary.install(preview.token);
+        await engine.refreshSkills(installed.map(entry => entry.id));
+        emit({ type: 'skills-changed' });
+        return installed.map(entry => ({ id: entry.id, name: entry.name }));
+      },
+      listAutomations: () => automationState(),
+      saveAutomation: async (input) => {
+        await automation.upsert(validateJobInput(input));
+        announceAutomation();
+        return automationState();
+      },
+      runAutomation: async (id) => {
+        await scheduler.runNow(identifier(id));
+        return automationState();
+      },
+      createTask: async (title, prompt) => {
+        const session = await engine.createSession(title);
+        const model = store.preferences.defaultModel;
+        if (prompt && model) {
+          await engine.sendMessage({ sessionId: session.id, text: prompt, model, variant: store.preferences.modelVariant, access: store.preferences.defaultAccess, files: [], skills: [] });
+        }
+        return { id: session.id, title: session.title };
+      },
+    });
+  } catch (error) {
+    console.warn('Relay control server did not start:', error instanceof Error ? error.message : error);
+  }
 }
 
 if (!app.requestSingleInstanceLock()) app.quit();

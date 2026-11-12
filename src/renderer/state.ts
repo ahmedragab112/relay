@@ -32,6 +32,37 @@ export function shouldDismissAttention(previousSessionId: string, nextSessionId:
   return userInitiated || previousSessionId !== nextSessionId;
 }
 
+// The composer steps aside while the agent waits on an approval or an answer, so the
+// request owns the space where the typing field was. "Type anyway" reveals it for the
+// current set of requests only.
+export function shouldHideComposer(pendingRequests: number, revealed: boolean): boolean {
+  return pendingRequests > 0 && !revealed;
+}
+
+// Order-independent key for the requests on screen, so a new request re-hides the composer
+// while a re-render of the same requests leaves a manual reveal alone.
+export function requestSignature(keys: string[]): string {
+  return [...keys].sort().join('\u001f');
+}
+
+export type InspectorTab = 'activity' | 'changes' | 'files' | 'browser';
+
+// While the agent works the inspector follows it: the tool log when a turn starts, the
+// changed files when it edits, and the page it opened when it browses. Choosing a tab
+// yourself hands control back for the rest of that turn, so the view never moves under you.
+export function followTab(signal: 'turn-start' | 'edit' | 'page', userSelectedTab: boolean): InspectorTab | undefined {
+  if (signal === 'page') return 'browser';
+  if (userSelectedTab) return undefined;
+  return signal === 'edit' ? 'changes' : 'activity';
+}
+
+export function imageSrc(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(trimmed)) return trimmed;
+  return externalURL(trimmed);
+}
+
 export function shouldBackgroundOnLeave(previous: Pick<SessionSummary, 'id' | 'status'> | undefined, nextId: string): string {
   return previous && previous.id !== nextId && previous.status === 'running' ? previous.id : '';
 }

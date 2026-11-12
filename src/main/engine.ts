@@ -5,7 +5,8 @@ import { access, chmod, mkdir, open, readdir, realpath, unlink, writeFile } from
 import { basename, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenCode, type JobSubagent, type OpenCodeClient, type FormInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
-import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary } from '../shared/contracts.js';
+import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary, AutoSettings } from '../shared/contracts.js';
+import { autoModelCandidates } from '../shared/contracts.js';
 import { providerPreset } from '../shared/providers.js';
 import { mapMessages, mapPermission, mapQuestion, mapSession, locatedSession, answerForm } from './engine-mapping.js';
 import { annotateAttention, attentionRequests } from './attention.js';
@@ -147,6 +148,17 @@ const agentFor = (access: AccessLevel): AgentMode => access === 'read' ? 'plan' 
 
 const activationPending = (error: unknown): boolean => /did not finish activating/i.test(error instanceof Error ? error.message : String(error));
 
+const executionErrorMessage = (data: Record<string, unknown>): string => {
+  const raw = data.error as { message?: string; status?: number } | undefined;
+  const message = typeof raw?.message === 'string' ? raw.message : 'the model failed';
+  return raw?.status ? `${message} (status ${raw.status})` : message;
+};
+
+const isLimitError = (error: unknown): boolean => {
+  const message = (error instanceof Error ? error.message : String(error)) ?? '';
+  return /rate.?limit|too many requests|429|quota|credits?|insufficient|max[_ ]?tokens|limit (reached|exceeded)|overloaded/i.test(message);
+};
+
 export async function retryActivation<T>(operation: () => Promise<T>, delay = 250, attempts = 30): Promise<T> {
   for (let attempt = 1; ; attempt++) {
     try { return await operation(); }
@@ -212,6 +224,27 @@ export class Engine {
   private directory = '';
   private workspaces: string[] = [];
   private providers: ProviderInput[] = [];
+  private autoSessions = new Map<string, { settings?: AutoSettings; tried: Set<string>; current?: string }>();
+  private modelLimits = new Map<string, number>();
+
+  // Rate-limit / credits failures are remembered so the model menu can flag them.
+  private static readonly LIMIT_TTL = 6 * 60 * 60 * 1000;
+
+  private recordLimit(id: string): void {
+    this.modelLimits.set(id, Date.now());
+    this.emit({ type: 'models-changed' });
+  }
+
+  private clearLimit(id: string): void {
+    if (this.modelLimits.delete(id)) this.emit({ type: 'models-changed' });
+  }
+
+  private isLimited(id: string): boolean {
+    const at = this.modelLimits.get(id);
+    if (at === undefined) return false;
+    if (Date.now() - at > Engine.LIMIT_TTL) { this.modelLimits.delete(id); return false; }
+    return true;
+  }
   private mcp: McpServer[] = [];
   private abort?: AbortController;
   private configPath?: string;
@@ -329,10 +362,12 @@ export class Engine {
     if (event.type === 'form.created') { const form = (data as { form: FormInfo }).form; if (form) this.emit({ type: 'question', request: mapQuestion(form) }); return; }
     if (event.type === 'form.replied' || event.type === 'form.cancelled') { this.emit({ type: 'question-resolved', id: String(data.formID) }); return; }
     if (event.type === 'session.idle' && typeof data.sessionID === 'string') {
+      this.autoSessions.delete(String(data.sessionID));
       this.emit({ type: 'session-idle', sessionId: data.sessionID });
       void this.getUsage(data.sessionID).then((usage) => this.emit({ type: 'usage', sessionId: data.sessionID as string, usage })).catch(() => {});
       void this.maybeCompact(data.sessionID);
     }
+    if (event.type === 'session.execution.failed' && typeof data.sessionID === 'string') { void this.autoRestart(String(data.sessionID), executionErrorMessage(data)); return; }
     if (event.type.startsWith('session.') && typeof data.sessionID === 'string') {
       // Token and tool-progress events are live decorations; the conversation snapshot updates when steps settle.
       if (LIVE_ONLY.has(event.type)) return;
@@ -527,9 +562,53 @@ export class Engine {
     await this.client.session.switchModel({ sessionID, model: { providerID, id, ...(variant ? { variant } : {}) } as never });
   }
 
+  // Access changes apply to the running turn, not just the next message, so switching to a
+  // more permissive level stops new approvals mid-task. The model is left alone.
+  async setSessionAccess(sessionID: string, access: AccessLevel): Promise<void> {
+    await this.client.session.switchAgent({ sessionID, agent: agentFor(access) });
+    await this.client.session.update({ sessionID, permissions: sessionRules(access) });
+  }
+
+  // Auto mode died mid-run because the model hit a limit: switch to the next
+  // connected candidate and nudge the session to continue without dropping the turn.
+  private async switchModelOnly(sessionID: string, model: string, variant: string): Promise<void> {
+    const [providerID, ...rest] = model.split('::');
+    const id = rest.join('::');
+    if (!providerID || !id) throw new Error('Choose a configured model before sending.');
+    await this.client.session.switchModel({ sessionID, model: { providerID, id, ...(variant ? { variant } : {}) } as never });
+  }
+
+  private async autoRestart(sessionId: string, detail: string): Promise<void> {
+    const entry = this.autoSessions.get(sessionId);
+    if (!entry) { this.sessionChanged(sessionId); return; }
+    if (isLimitError(detail) && entry.current) this.recordLimit(entry.current);
+    const models = await this.listModels().catch(() => [] as ModelOption[]);
+    const candidates = autoModelCandidates(models, entry.settings);
+    const next = candidates.find((candidate) => !entry.tried.has(candidate.id));
+    if (!next) {
+      this.autoSessions.delete(sessionId);
+      this.emit({ type: 'error', message: `Auto mode stopped: ${detail}. Every available model failed.` });
+      this.sessionChanged(sessionId);
+      return;
+    }
+    entry.tried.add(next.id);
+    entry.current = next.id;
+    try {
+      await this.switchModelOnly(sessionId, next.id, next.variant);
+      this.emit({ type: 'auto-switched', sessionId, model: next.id, detail });
+      await this.client.session.prompt({
+        sessionID: sessionId,
+        text: 'The previous attempt stopped because the model hit a limit. Continue exactly from where you left off, without repeating finished work.',
+      });
+    } catch (error) {
+      this.autoSessions.delete(sessionId);
+      this.emit({ type: 'error', message: `Auto mode could not continue on another model: ${error instanceof Error ? error.message : 'unknown error'}` });
+      this.sessionChanged(sessionId);
+    }
+  }
+
   async sendMessage(input: SendMessageInput): Promise<void> {
     const access = input.planOnly ? 'read' : input.access;
-    await this.applySessionSettings(input.sessionId, input.model, input.variant, access);
     const files = await Promise.all(input.files.map((path) => readAttachment(this.directory, path)));
     const requested = new Set(input.skills);
     const skills = (await this.listSkills()).filter((skill) => requested.has(skill.id)).map((skill) => ({ id: skill.id }));
@@ -545,19 +624,40 @@ export class Engine {
     const text = input.goalDriven
       ? `${prefix}Treat this as a goal: keep working and verifying until it is complete, and only stop when the goal is met or you are blocked.\n\n${composed}`
       : `${prefix}${composed}`;
-    await this.client.session.prompt({
-      sessionID: input.sessionId, text, files,
-      ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}),
-      ...(input.delivery ? { delivery: input.delivery } : {}),
-      metadata: {
-        relay: {
-          text: input.text, files: input.files, skills: input.skills, agents: input.agents ?? [],
-          model: input.model, variant: input.variant, access, planOnly: input.planOnly === true,
-          goalDriven: input.goalDriven === true,
-          context: context.map((block) => ({ label: block.label, text: block.text })),
-        },
-      },
-    });
+
+    const candidates: Array<{ id: string; variant: string }> = input.auto
+      ? autoModelCandidates(await this.listModels(), input.autoSettings)
+      : [{ id: input.model, variant: input.variant }];
+
+    if (!candidates.length) throw new Error('No connected model available. Configure a provider in Settings.');
+
+    let lastError: unknown;
+    for (const candidate of candidates) {
+      try {
+        await this.applySessionSettings(input.sessionId, candidate.id, candidate.variant, access);
+        await this.client.session.prompt({
+          sessionID: input.sessionId, text, files,
+          ...(skills.length ? { skills } : {}), ...(agents.length ? { agents } : {}),
+          ...(input.delivery ? { delivery: input.delivery } : {}),
+          metadata: {
+            relay: {
+              text: input.text, files: input.files, skills: input.skills, agents: input.agents ?? [],
+              model: candidate.id, variant: candidate.variant, access, planOnly: input.planOnly === true,
+              goalDriven: input.goalDriven === true,
+              context: context.map((block) => ({ label: block.label, text: block.text })),
+              auto: input.auto === true,
+            },
+          },
+        });
+        this.clearLimit(candidate.id);
+        if (input.auto) this.autoSessions.set(input.sessionId, { settings: input.autoSettings, tried: new Set([candidate.id]), current: candidate.id });
+        return;
+      } catch (error) {
+        if (isLimitError(error)) this.recordLimit(candidate.id);
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error('No available model could handle the request.');
   }
 
   async listQueuedMessages(sessionID: string): Promise<QueuedMessage[]> {
@@ -697,6 +797,8 @@ export class Engine {
         id: `${model.providerID}::${model.modelID}`, providerID: model.providerID, modelID: model.modelID,
         name: `${model.providerID} · ${model.name}`, connected: connected.has(model.providerID as ProviderInput['id']) || model.providerID === 'opencode',
         free: !detail.cost?.length || detail.cost.every((entry) => !entry.input && !entry.output),
+        limited: this.isLimited(`${model.providerID}::${model.modelID}`),
+        cost: detail.cost?.[0] ? ((detail.cost[0].input ?? 0) + (detail.cost[0].output ?? 0)) : 0,
         variants: (detail.variants ?? []).map((entry) => entry.id),
         context: detail.limit?.context,
       };
@@ -726,7 +828,13 @@ export class Engine {
   async runCommand(input: RunCommandInput): Promise<void> {
     const available = await this.listCommands();
     if (!available.some((command) => command.name === input.name)) throw new Error('Choose an available command.');
-    await this.applySessionSettings(input.sessionId, input.model, input.variant, input.access);
+    let model = input.model;
+    let variant = input.variant;
+    if (!model) {
+      const best = (await this.listModels()).filter((m) => m.connected).sort((a, b) => (a.cost ?? 0) - (b.cost ?? 0) || (a.context ?? 0) - (b.context ?? 0))[0];
+      if (best) { model = best.id; variant = best.variants?.[0] ?? ''; }
+    }
+    await this.applySessionSettings(input.sessionId, model, variant, input.access);
     const files = await Promise.all(input.files.map((path) => readAttachment(this.directory, path)));
     const requested = new Set(input.skills);
     const skills = (await this.listSkills()).filter((skill) => requested.has(skill.id)).map((skill) => ({ id: skill.id }));

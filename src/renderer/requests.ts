@@ -1,9 +1,11 @@
 import type { AgentQuestion, AppEvent, PermissionRequest } from '../shared/contracts';
-import { byId } from './dom';
+import { byId, el } from './dom';
+import { requestSignature, shouldHideComposer } from './state';
 import { permissionCard, questionCard } from './request-cards';
 
 export class RequestView {
   private root = byId('requests');
+  private chat = byId('requests').closest('.chat') as HTMLElement;
   private permissions = new Map<string, PermissionRequest>();
   private questions = new Map<string, AgentQuestion>();
   private cards = new Map<string, HTMLElement>();
@@ -12,11 +14,18 @@ export class RequestView {
   private eventRevision = 0;
   private skipUnanswered = false;
   private skipping = new Set<string>();
+  private signature = '';
+  private revealed = false;
+  private waiting = 0;
+  private note: HTMLElement | undefined;
+  private focusStolen = false;
 
   select(id: string): void { this.sessionId = id; this.autoSkip(); this.render(); }
   clear(): void {
     this.generation++;
     this.permissions.clear(); this.questions.clear(); this.cards.clear(); this.root.replaceChildren();
+    this.signature = ''; this.revealed = false; this.waiting = 0; this.note = undefined; this.focusStolen = false;
+    this.apply();
   }
 
   setSkipUnanswered(value: boolean): void {
@@ -73,5 +82,47 @@ export class RequestView {
     }));
     for (const [id, card] of this.cards) if (!visible.has(id)) { card.remove(); this.cards.delete(id); }
     this.root.hidden = !visible.size;
+    const signature = requestSignature([...visible]);
+    if (signature !== this.signature) { this.signature = signature; this.revealed = false; }
+    this.waiting = visible.size;
+    this.apply();
+  }
+
+  // While the agent is waiting, the composer hands its space to the request card. The note
+  // carries the escape hatch for anyone who still wants to steer the running turn.
+  private apply(): void {
+    const hide = shouldHideComposer(this.waiting, this.revealed);
+    const typing = document.activeElement instanceof HTMLElement && document.activeElement.id === 'prompt';
+    if (hide) {
+      const note = this.escapeNote();
+      this.root.append(note);
+      note.hidden = false;
+    } else if (this.note) {
+      this.note.hidden = true;
+    }
+    this.chat.classList.toggle('awaiting-input', hide);
+    this.root.setAttribute('aria-label', hide ? 'Agent requests — waiting on you' : 'Agent requests');
+    if (hide && typing) {
+      this.focusStolen = true;
+      this.root.querySelector<HTMLElement>('.request-card button, .request-card input')?.focus();
+    } else if (!hide && this.focusStolen) {
+      this.focusStolen = false;
+      byId<HTMLTextAreaElement>('prompt').focus();
+    }
+  }
+
+  private escapeNote(): HTMLElement {
+    if (this.note) return this.note;
+    const note = el('div', 'awaiting-note');
+    const button = el('button', 'text-button', 'Type anyway');
+    button.type = 'button';
+    button.addEventListener('click', () => {
+      this.revealed = true;
+      this.apply();
+      byId<HTMLTextAreaElement>('prompt').focus();
+    });
+    note.append(el('p', '', 'The agent is waiting on you.'), button);
+    this.note = note;
+    return note;
   }
 }

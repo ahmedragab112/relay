@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
-  AppEvent, AgentMode, AutomationInput, DictationInput, McpServer, PermissionDecision, ProviderInput, RelayAPI, RunCommandInput, SendMessageInput,
+  AppEvent, AgentMode, AutomationInput, DictationInput, McpServer, PermissionDecision, ProviderInput, RelayAPI, RunCommandInput, SendMessageInput, AccessLevel,
 } from '../shared/contracts.js';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(channel, ...args);
@@ -25,6 +25,7 @@ const api: RelayAPI = {
   setMessageReaction: (sessionId: string, messageId: string, reaction) => invoke('sessions:react', sessionId, messageId, reaction),
   copyText: (value: string) => invoke('clipboard:write', value),
   sendMessage: (input: SendMessageInput) => invoke('sessions:send', input),
+  setSessionAccess: (sessionId: string, access: AccessLevel) => invoke('sessions:access', sessionId, access),
   listQueuedMessages: (sessionId: string) => invoke('sessions:inbox', sessionId),
   removeQueuedMessage: (sessionId: string, id: string) => invoke('sessions:inbox-remove', sessionId, id),
   steerQueuedMessage: (sessionId: string, id: string) => invoke('sessions:inbox-steer', sessionId, id),
