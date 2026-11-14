@@ -140,7 +140,7 @@ export class ActivityView {
 
   private backgroundSection(): HTMLElement | null {
     if (!this.background.length) return null;
-    return section('Background work', String(this.background.length), this.background.map(run => this.backgroundRun(run)), '');
+    return section('Running now', String(this.background.length), this.background.map(run => this.backgroundRun(run)), '');
   }
 
   private backgroundRun(run: BackgroundRun): HTMLElement {
@@ -157,7 +157,7 @@ export class ActivityView {
     actions.append(button('Open task', () => this.openTask(run.id), 'text-button'));
     row.append(
       summary,
-      el('p', 'activity-run-time', run.startedAt ? `Backgrounded ${when(run.startedAt)}` : ''),
+      el('p', 'activity-run-time', run.updatedAt ? `Active ${when(run.updatedAt)}` : ''),
       el('pre', 'activity-run-logs', logs),
       actions,
     );

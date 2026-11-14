@@ -317,6 +317,12 @@ export interface CompactionPart {
   error?: string;
 }
 
+export interface AutoSwitchPart {
+  type: 'auto-switch';
+  id: string;
+  model?: string;
+}
+
 export type MessageReaction = 'like' | 'dislike';
 
 export interface ChatMessage {
@@ -328,7 +334,7 @@ export interface ChatMessage {
   cost?: number;
   model?: string;
   modelVariant?: string;
-  parts: Array<TextPart | ToolPart | AttachmentPart | CompactionPart>;
+  parts: Array<TextPart | ToolPart | AttachmentPart | CompactionPart | AutoSwitchPart>;
   error?: string;
   reaction?: MessageReaction;
 }
@@ -485,7 +491,6 @@ export interface BackgroundRun {
   id: string;
   title: string;
   status: 'idle' | 'running' | 'error';
-  startedAt: number;
   updatedAt: number;
   logs: string[];
 }
@@ -602,6 +607,23 @@ export interface McpServer {
   status?: string;
 }
 
+export interface McpRuntimeStatus {
+  name: string;
+  status: 'connected' | 'pending' | 'disabled' | 'failed';
+  error?: string;
+}
+
+export interface ConnectorCatalogEntry {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  type: 'local' | 'remote';
+  command?: string[];
+  url?: string;
+  configured: boolean;
+}
+
 export interface AppState {
   version: string;
   platform: string;
@@ -697,7 +719,6 @@ export interface RelayAPI {
   removeQueuedMessage(sessionId: string, id: string): Promise<void>;
   steerQueuedMessage(sessionId: string, id: string): Promise<void>;
   abortSession(sessionId: string): Promise<void>;
-  backgroundSession(sessionId: string): Promise<void>;
   listPermissions(): Promise<PermissionRequest[]>;
   replyPermission(id: string, decision: PermissionDecision): Promise<void>;
   listQuestions(): Promise<AgentQuestion[]>;
@@ -736,6 +757,9 @@ export interface RelayAPI {
   saveProvider(input: ProviderInput): Promise<AppState>;
   removeProvider(id: ProviderInput['id']): Promise<AppState>;
   listMcp(): Promise<McpServer[]>;
+  listConnectorCatalog(): Promise<ConnectorCatalogEntry[]>;
+  connectorStatus(): Promise<McpRuntimeStatus[]>;
+  connectConnector(name: string): Promise<McpRuntimeStatus[]>;
   saveMcp(server: McpServer): Promise<void>;
   removeMcp(name: string): Promise<void>;
   createTerminal(cols: number, rows: number): Promise<{ id: string }>;
@@ -752,6 +776,8 @@ export interface RelayAPI {
   minimizeWindow(): Promise<void>;
   zoomWindow(): Promise<void>;
   closeWindow(): Promise<void>;
+  confirmClose(): Promise<void>;
+  onRequestClose(listener: () => void): () => void;
   onEvent(listener: (event: AppEvent) => void): () => void;
 }
 

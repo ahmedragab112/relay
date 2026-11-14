@@ -15,8 +15,8 @@ import { AttentionView } from './attention';
 import { ToolsPage, type ToolsMode } from './tools-page';
 import { playChime } from './chime';
 import { TerminalView } from './terminal';
-import { showSettings } from './settings';
-import { showAutomation } from './automation';
+import { showSettings, closeSettings } from './settings';
+import { showAutomation, closeAutomation } from './automation';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
 import { showSearch } from './search';
@@ -24,7 +24,7 @@ import { ReviewCard } from './review';
 import { UsageMeter } from './usage';
 import { homeGame } from './home-game';
 import { coalescedReload } from './reload';
-import { shouldBackgroundOnLeave, shouldDismissAttention } from './state';
+import { shouldDismissAttention } from './state';
 import { disposeWorkers, editorTheme } from './monaco';
 import { shortcutLabel } from './shortcuts';
 import { providerPreset } from '../shared/providers';
@@ -71,7 +71,7 @@ const composer = new Composer(() => {
   const provider = state?.providers.find(item => item.id === preferences.provider);
   return Boolean(provider && (provider.hasKey || providerPreset(preferences.provider)?.keyless));
 });
-const sessions = new Sessions(selectSession, openFolder);
+const sessions = new Sessions(selectSession, openFolder, () => reviewReload.request(), id => requests.pendingFor(id) > 0);
 const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
 const tools = new ToolsPage({ openTask: openSession, openFolder: id => { void openFolder(id); } });
@@ -174,15 +174,10 @@ function homeExtras(): { suggestions?: Array<{ label: string; action: () => void
   return extras;
 }
 
-function backgroundRunning(nextId = ''): void {
-  const id = shouldBackgroundOnLeave(selectedSession, nextId);
-  if (id) void window.relay.backgroundSession(id).catch(() => {});
-}
-
 function selectSession(session?: SessionSummary, userInitiated = false): void {
   const nextId = session?.id ?? '';
-  backgroundRunning(nextId);
   const changed = selectedId !== nextId;
+  if (userInitiated) closeOverlayPages();
   if (shouldDismissAttention(selectedId, nextId, userInitiated)) { attention.close(); tools.close(); }
   selectedId = nextId;
   selectedSession = session;
@@ -197,11 +192,11 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
     chat.setRunning(session.status === 'running');
     if (changed) messagesReload.request();
   } else if (!state?.workspace) {
-    chat.empty('A calmer place to build.', 'Open a local project, then configure a model. Your tasks, files, and terminal live together here.', [
+    chat.empty('Build with your own models.', 'Open a local project, attach a provider (most free tiers work), and your tasks run against the local OpenCode engine on this Mac.', [
       { label: 'Open project', action: openProject }, { label: 'Configure model', action: settings },
     ]);
   } else {
-    chat.empty('What are we building?', 'Configure a model, then create a task to start working in this project.', [
+    chat.empty('What should we build?', 'Describe the goal. Relay inspects your project, makes the changes, and verifies them before declaring done.', [
       { label: 'New task', action: newTask }, { label: 'Configure model', action: settings },
     ], homeExtras());
   }
@@ -240,8 +235,12 @@ async function refreshCommands(): Promise<void> {
   }
 }
 
+// Only one overlay page may be visible at a time (settings/automation/toolkit/attention stack).
+const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); tools.close(); attention.close(); };
+
 function settings(): void {
   if (!state) { notify('App state is not available yet. Use Refresh to retry.', true); return; }
+  closeOverlayPages();
   showSettings(() => state!, apply, refreshModels);
 }
 
@@ -332,17 +331,17 @@ function search(mode: SearchMode): void {
 function openSession(id: string): void { sessions.open(id); }
 
 function openTools(mode: ToolsMode): void {
-  backgroundRunning();
-  attention.close();
+  closeOverlayPages();
   tools.show(mode);
 }
 
 function toggleAttention(): void {
-  if (!attention.isOpen) { backgroundRunning(); tools.close(); }
+  if (!attention.isOpen) closeOverlayPages();
   attention.toggle();
 }
 
 function openAutomation(): void {
+  closeOverlayPages();
   showAutomation(async id => {
     await sessions.reload();
     sessions.select(id);
@@ -357,6 +356,10 @@ function palette(): void {
   ];
   if (state?.workspace) {
     commands.push({ label: 'New task', shortcut: key('Mod+N'), action: newTask },
+      { label: 'Template: Debug failing test', action: () => void composer.sendText('A test is failing. Reproduce it, find the root cause, fix it, and verify by running the test again.') },
+      { label: 'Template: Review this diff', action: () => void composer.sendText('Review the current changes: list correctness bugs, security risks and design problems with file references, then summarize what is safe to ship.') },
+      { label: 'Template: Write tests', action: () => void composer.sendText('Write tests for the code I just changed. Cover the happy path, edge cases and error paths, then run them.') },
+      { label: 'Template: Explain this repo', action: () => void composer.sendText('Explain how this repository is structured: the entry points, data flow, and the two or three files that matter most. Keep it short.') },
       { label: 'Go to file…', shortcut: key('Mod+P'), action: () => search('files') },
       { label: 'Search in files…', shortcut: key('Mod+F'), action: () => search('content') },
       { label: 'Open in-app browser', action: () => { showInspector(); inspector.openBrowser(); } },
@@ -364,7 +367,7 @@ function palette(): void {
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
       { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
       { label: 'Scheduled automation', action: openAutomation },
-      { label: 'Attention — agent requests', action: () => { backgroundRunning(); attention.show(); } },
+      { label: 'Attention — agent requests', action: () => { closeOverlayPages(); attention.show(); } },
       { label: 'Usage & context', action: () => usage.open() },
       { label: 'Compact conversation', action: () => usage.compactNow() },
       ...sessions.items.map(session => ({ label: `Task: ${session.title}`, action: () => sessions.open(session.id) })));
@@ -396,6 +399,7 @@ function event(event: AppEvent): void {
   requests.event(event);
   const attentionEvent = event.type === 'permission' || event.type === 'permission-resolved' || event.type === 'question' || event.type === 'question-resolved';
   if (attentionEvent || (attention.isOpen && (event.type === 'session-idle' || event.type === 'session-changed' || event.type === 'sessions-changed'))) attentionReload.request();
+  if (attentionEvent) sessionsRefresh.request();
   if (event.type === 'job-preview') {
     showInspector(); inspector.openPage(event.url);
     let host = event.url;
@@ -423,7 +427,7 @@ function event(event: AppEvent): void {
     if (visibleActivity()) activityReload.request();
     sessionsReload.request();
   } else if (event.type === 'usage') usage.apply(event.sessionId, event.usage);
-  else if (event.type === 'open-session') { attention.close(); sessions.open(event.sessionId); }
+  else if (event.type === 'open-session') { closeOverlayPages(); sessions.open(event.sessionId); }
   else if (event.type === 'sessions-changed') sessionsReload.request();
   else if (event.type === 'skills-changed') { void refreshSkills(); if (tools.isOpen) void tools.reload(); }
   else if (event.type === 'plugins-changed' && tools.isOpen) void tools.reload();
@@ -475,6 +479,18 @@ bind('tools-button', () => openTools('skills'));
 bind('palette-button', palette);
 bind('terminal-button', () => terminal.open());
 bind('inspector-button', toggleInspector);
+const overflowMenu = byId('title-overflow');
+const overflowButton = byId<HTMLButtonElement>('overflow-button');
+const setOverflow = (value?: boolean): void => {
+  const open = value ?? overflowMenu.hidden;
+  overflowMenu.hidden = !open;
+  overflowButton.setAttribute('aria-expanded', String(open));
+};
+overflowButton.addEventListener('click', () => setOverflow());
+document.addEventListener('pointerdown', event => {
+  if (!(event.target as HTMLElement).closest('.title-overflow-wrap')) setOverflow(false);
+});
+for (const id of ['terminal-button', 'inspector-button']) byId(id).addEventListener('click', () => setOverflow(false));
 bind('sidebar-button', toggleSidebar);
 bind('retry-state', boot);
 function attachOpenFile(): void {
@@ -532,16 +548,15 @@ function keydown(event: KeyboardEvent): void {
 document.addEventListener('keydown', keydown);
 systemTheme.addEventListener('change', appearance);
 
-let allowClose = false;
-let confirmingClose = false;
-window.addEventListener('beforeunload', event => {
-  if (allowClose || !inspector.editor.dirty) return;
-  event.preventDefault(); event.returnValue = '';
-  if (confirmingClose) return;
-  confirmingClose = true;
-  void inspector.editor.canLeave().then(accepted => {
-    if (accepted) { allowClose = true; window.close(); }
-  }).finally(() => { confirmingClose = false; });
+let requestingClose = false;
+window.relay.onRequestClose(async () => {
+  if (requestingClose) return;
+  requestingClose = true;
+  try {
+    if (!inspector.editor.dirty) { await window.relay.confirmClose(); return; }
+    const accepted = await confirmAction('Discard unsaved changes?', 'You have unsaved edits in the file. Close anyway and discard them?', 'Discard and close');
+    if (accepted) await window.relay.confirmClose();
+  } finally { requestingClose = false; }
 });
 window.addEventListener('unload', () => {
   disposed = true; unsubscribe?.();

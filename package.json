@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@opencode/client": "2.2.6",
+    "@opencode/plugin-browser": "^2.2.6",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "dompurify": "3.4.17",
@@ -85,11 +86,15 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
@@ -111,11 +116,17 @@
       "target": [
         {
           "target": "AppImage",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         },
         {
           "target": "deb",
-          "arch": ["x64", "arm64"]
+          "arch": [
+            "x64",
+            "arm64"
+          ]
         }
       ],
       "artifactName": "${productName}-${version}-${arch}.${ext}"

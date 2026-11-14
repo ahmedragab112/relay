@@ -1,4 +1,6 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, safeStorage, session, shell, systemPreferences, type IpcMainInvokeEvent, type Session, type WebContents } from 'electron';
+import { randomUUID } from 'node:crypto';
+import { Browser } from '@opencode/plugin-browser/rpc';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -6,12 +8,15 @@ import { pathToFileURL } from 'node:url';
 import type {
   AccessLevel, AgentMode, AppEvent, AppState, AutomationJob, AutomationState, ContextBlock, McpServer, PermissionDecision, PluginCatalogEntry, PluginView, PreferencesPatch, ProviderInput, RunCommandInput, SendMessageInput,
 } from '../shared/contracts.js';
-import { Engine } from './engine.js';
+import { Engine, type EngineBrowserHooks } from './engine.js';
+import { startBrowserHost, type BrowserHost, type BrowserPageDriver, type BrowserRpc } from './browser.js';
+import { createBrowserDriver } from './browser-page.js';
 import { finishAlert } from './alerts.js';
 import { AutomationStore, Scheduler, validateJobInput } from './schedules.js';
 import { transcribe, transcriptionTarget, validateAudio } from './dictation.js';
 import { downloadPluginPackage } from './import.js';
 import { mergeMcpServers, PluginManager } from './plugins.js';
+import { CONNECTOR_CATALOG, catalogView } from './connector-catalog.js';
 import { SkillRegistry } from './registry.js';
 import { undoFileChange } from './revert.js';
 import { text, identifier, isTrustedRenderer, validateExternalURL, dimensions } from './security.js';
@@ -35,7 +40,40 @@ let engineRoot = '';
 let files: WorkspaceFiles | undefined;
 let expectedURL = '';
 let restarting: Promise<void> = Promise.resolve();
+
+/** Hosts the agent browser: Relay's own Electron acts as the engine's desktop browser (no Chrome). */
+function browserHooks(): EngineBrowserHooks {
+  const capturesDirectory = join(app.getPath('userData'), 'relay', 'agent-browser');
+  const hosts = new Map<string, BrowserHost>();
+  return {
+    attach(sessionID, directory) {
+      const current = engine;
+      if (!current || hosts.has(sessionID)) return;
+      try {
+        const definition = Browser.Definition as unknown;
+        const rpc = (current.client as unknown as { rpc: (definition: unknown) => BrowserRpc }).rpc(definition);
+        const driver: BrowserPageDriver = createBrowserDriver({ capturesDirectory });
+        const host = startBrowserHost({
+          rpc,
+          sessionID,
+          connectionID: randomUUID(),
+          location: { directory },
+          driver,
+          onError: (cause) => console.warn('Agent browser host stopped:', cause instanceof Error ? cause.message : cause),
+        });
+        hosts.set(sessionID, host);
+      } catch (error) {
+        console.warn('Agent browser failed to attach:', error instanceof Error ? error.message : error);
+      }
+    },
+    disposeAll() {
+      for (const host of hosts.values()) host.dispose();
+      hosts.clear();
+    },
+  };
+}
 let shuttingDown = false;
+let allowClose = false;
 const confirmedTerminals = new Set<string>();
 const sessionTitles = new Map<string, string>();
 const material = windowMaterial(process.platform as Platform, os.release());
@@ -311,7 +349,6 @@ function register(): void {
   define('sessions:inbox', async (_event, id) => needEngine().listQueuedMessages(identifier(id)));
   define('sessions:inbox-remove', async (_event, id, inboxId) => needEngine().removeQueuedMessage(identifier(id), identifier(inboxId)));
   define('sessions:inbox-steer', async (_event, id, inboxId) => needEngine().steerQueuedMessage(identifier(id), identifier(inboxId)));
-  define('sessions:background', async (_event, id) => needEngine().backgroundSession(identifier(id)));
   define('permissions:list', () => needEngine().listPermissions());
   define('permissions:reply', async (_event, id, decision) => {
     if (decision !== 'once' && decision !== 'reject') throw new Error('Invalid permission decision.');
@@ -395,6 +432,9 @@ function register(): void {
   define('providers:save', async (_event, value) => { await store.saveProvider(value as ProviderInput); await restart(); return state(); });
   define('providers:remove', async (_event, id) => { await store.removeProvider(id as ProviderInput['id']); await restart(); return state(); });
   define('mcp:list', () => store.mcp);
+  define('connectors:catalog', () => catalogView(CONNECTOR_CATALOG, new Set(store.mcp.map((server) => server.name))));
+  define('connectors:status', async () => needEngine().mcpStatuses());
+  define('connectors:connect', async (_event, name) => needEngine().connectMcp(text(name, 'Connector name', 64)));
   define('mcp:save', async (_event, value) => {
     const server = validateMcp(value as McpServer);
     if (server.enabled && (server.type === 'local' || server.url)) {
@@ -497,6 +537,7 @@ function register(): void {
   define('window:minimize', () => window?.minimize());
   define('window:zoom', () => { if (!window) return; window.isMaximized() ? window.unmaximize() : window.maximize(); });
   define('window:close', () => window?.close());
+  define('app:confirm-close', () => { allowClose = true; window?.close(); });
 }
 
 async function createWindow(): Promise<void> {
@@ -526,6 +567,13 @@ async function createWindow(): Promise<void> {
   window.webContents.on('did-attach-webview', (_event, guest) => hardenGuest(guest));
   window.once('ready-to-show', () => window?.show());
   window.on('closed', () => { window = undefined; });
+  window.on('close', (event) => {
+    // While the renderer is still loading it cannot answer the close confirm;
+    // blocking close here would hang a quit issued during startup forever.
+    if (allowClose || window?.webContents.isLoading()) return;
+    event.preventDefault();
+    window?.webContents.send('app:request-close');
+  });
   if (development) await window.loadURL(expectedURL); else await window.loadFile(renderer);
 }
 
@@ -571,7 +619,7 @@ async function boot(): Promise<void> {
   automation = new AutomationStore(join(root, 'automation.json'));
   await automation.load();
   engineRoot = join(root, 'engine');
-  engine = new Engine(engineRoot, engineBinary(), emit);
+  engine = new Engine(engineRoot, engineBinary(), emit, browserHooks());
   engine.setAutoCompact(store.preferences.context.autoCompact, store.preferences.context.compactThreshold);
   plugins = new PluginManager(join(engineRoot, 'plugins'));
   await plugins.cleanup();
@@ -634,6 +682,9 @@ async function boot(): Promise<void> {
   }
 }
 
+process.on('uncaughtException', error => { console.error('Relay uncaught exception:', error); });
+process.on('unhandledRejection', reason => { console.error('Relay unhandled rejection:', reason); });
+
 if (!app.requestSingleInstanceLock()) app.quit();
 else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
@@ -653,6 +704,18 @@ else {
     shuttingDown = true;
     event.preventDefault();
     scheduler?.stop();
-    void (engine ? engine.stop() : Promise.resolve()).finally(() => app.quit());
+    // Armed for the whole quit sequence, not just engine teardown: app.quit() can
+    // still be blocked by the window-close confirm, and without this backstop the
+    // app would hang forever (e.g. quit while the renderer is still loading).
+    const forceQuit = setTimeout(() => app.exit(0), 6_000);
+    void (async () => {
+      try {
+        await (engine ? engine.stop() : Promise.resolve());
+      } catch (error) {
+        console.warn('Quit: engine stop failed:', error instanceof Error ? error.message : error);
+      } finally {
+        app.quit();
+      }
+    })();
   });
 }

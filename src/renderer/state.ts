@@ -9,6 +9,18 @@ export function chooseModel(models: ModelOption[], preferred: string): string {
   return available.find(model => model.id === preferred)?.id ?? available[0]?.id ?? '';
 }
 
+/**
+ * The selection the composer shows when (re)loading the model list. A saved
+ * preference always wins; an explicit choice made this session is kept even
+ * before its preference has been saved; otherwise the composer starts on
+ * Auto (best available) and lets the engine pick the cheapest connected model.
+ */
+export function resolveInitialModel(models: ModelOption[], preferred: string, currentId: string): { modelId: string; autoModel: boolean } {
+  if (preferred) return { modelId: chooseModel(models, preferred), autoModel: false };
+  if (currentId) return { modelId: chooseModel(models, currentId), autoModel: false };
+  return { modelId: '', autoModel: true };
+}
+
 export function isDirty(document: { content: string } | undefined, content: string): boolean {
   return document !== undefined && document.content !== content;
 }
@@ -63,8 +75,16 @@ export function imageSrc(value: string): string | null {
   return externalURL(trimmed);
 }
 
-export function shouldBackgroundOnLeave(previous: Pick<SessionSummary, 'id' | 'status'> | undefined, nextId: string): string {
-  return previous && previous.id !== nextId && previous.status === 'running' ? previous.id : '';
+export function cleanVoiceText(value: string): string {
+  let text = value.trim();
+  if (!text) return '';
+  const filler = /\b(um+|uh+|you know|like|basically|actually|i mean|so yeah|well|literally)\b[\s,.]*/gi;
+  text = text.replace(filler, ' ').trim();
+  text = text.replace(/\s{2,}/g, ' ').replace(/\s+([,.!?;:])/g, '$1').trim();
+  text = text.replace(/(^|[.!?]\s+)([a-z])/g, (_, lead, ch) => lead + ch.toUpperCase());
+  text = text.trim();
+  if (text && !/[.!?]$/.test(text)) text += '.';
+  return text;
 }
 
 export interface ReloadState { running: boolean; queued: boolean }

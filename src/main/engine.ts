@@ -1,11 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants, type Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { access, chmod, mkdir, open, readdir, realpath, unlink, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, open, readdir, realpath, readFile, unlink, writeFile } from 'node:fs/promises';
 import { basename, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenCode, type JobSubagent, type OpenCodeClient, type FormInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
-import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary, AutoSettings } from '../shared/contracts.js';
+import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpRuntimeStatus, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary, AutoSettings } from '../shared/contracts.js';
 import { autoModelCandidates } from '../shared/contracts.js';
 import { providerPreset } from '../shared/providers.js';
 import { mapMessages, mapPermission, mapQuestion, mapSession, locatedSession, answerForm } from './engine-mapping.js';
@@ -14,7 +14,7 @@ import { AttentionLog, permissionSummary, questionSummary } from './attention-lo
 import { buildActivity } from './activity.js';
 import { buildBackgroundRuns } from './background.js';
 import { mapQueuedMessages } from './queue.js';
-import { composeMessage } from './context.js';
+import { composeMessage, loadProjectInstructions } from './context.js';
 import { summarizeUsage } from './usage.js';
 import { mapStreamEvent } from './streaming.js';
 import { defaultShell } from './platform.js';
@@ -156,7 +156,7 @@ const executionErrorMessage = (data: Record<string, unknown>): string => {
 
 const isLimitError = (error: unknown): boolean => {
   const message = (error instanceof Error ? error.message : String(error)) ?? '';
-  return /rate.?limit|too many requests|429|quota|credits?|insufficient|max[_ ]?tokens|limit (reached|exceeded)|overloaded/i.test(message);
+  return /rate.?limit|too many requests|429|quota|credits?|insufficient|max[_ ]?tokens|limit (reached|exceeded)|overloaded|no longer available|no provider serves|not available|unavailable|endpoint (not found|unavailable)|model .* not (found|served|supported)|no .* (endpoints?|providers?|hosts?) serve|model .* (none|does not|doesn't) serve/i.test(message);
 };
 
 export async function retryActivation<T>(operation: () => Promise<T>, delay = 250, attempts = 30): Promise<T> {
@@ -207,6 +207,25 @@ function providerConfig(providers: ProviderInput[], mcp: McpServer[], skillDirec
 
 function basic(password: string): string { return `Basic ${Buffer.from(`opencode:${password}`).toString('base64')}`; }
 
+// GET /api/mcp reports every connector with a live status; this maps the engine
+// payload defensively so the renderer only ever sees the four known states.
+export function mapMcpStatus(data: unknown): McpRuntimeStatus[] {
+  const list = Array.isArray((data as { data?: unknown[] })?.data)
+    ? (data as { data: unknown[] }).data
+    : Array.isArray(data) ? data : [];
+  const statuses: McpRuntimeStatus[] = [];
+  for (const item of list) {
+    const record = item as { name?: unknown; status?: { status?: unknown; error?: unknown } } | null;
+    if (!record || typeof record.name !== 'string' || !record.name) continue;
+    const raw = record.status?.status;
+    if (raw !== 'connected' && raw !== 'pending' && raw !== 'disabled' && raw !== 'failed') continue;
+    statuses.push(raw === 'failed'
+      ? { name: record.name, status: 'failed', error: typeof record.status?.error === 'string' && record.status.error.trim() ? record.status.error : 'The connector could not start.' }
+      : { name: record.name, status: raw });
+  }
+  return statuses;
+}
+
 function trustedEndpoint(value: string): string {
   const url = new URL(value);
   if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)) {
@@ -215,10 +234,15 @@ function trustedEndpoint(value: string): string {
   return url.href.replace(/\/$/, '');
 }
 
+/** Optional hooks that host the agent browser for each session (wired in index.ts with Electron). */
+export interface EngineBrowserHooks {
+  attach(sessionID: string, directory: string): void;
+  disposeAll(): void;
+}
+
 export class Engine {
   status: { state: 'stopped' | 'starting' | 'ready' | 'error'; detail: string; version?: string } = { state: 'stopped', detail: 'Not started' };
-  client!: OpenCodeClient;
-  private child?: ChildProcessWithoutNullStreams;
+  client!: OpenCodeClient;  private child?: ChildProcessWithoutNullStreams;
   private endpoint?: string;
   private password = '';
   private directory = '';
@@ -226,17 +250,42 @@ export class Engine {
   private providers: ProviderInput[] = [];
   private autoSessions = new Map<string, { settings?: AutoSettings; tried: Set<string>; current?: string }>();
   private modelLimits = new Map<string, number>();
-
   // Rate-limit / credits failures are remembered so the model menu can flag them.
   private static readonly LIMIT_TTL = 6 * 60 * 60 * 1000;
 
   private recordLimit(id: string): void {
     this.modelLimits.set(id, Date.now());
     this.emit({ type: 'models-changed' });
+    void this.persistLimits();
   }
 
   private clearLimit(id: string): void {
-    if (this.modelLimits.delete(id)) this.emit({ type: 'models-changed' });
+    if (!this.modelLimits.delete(id)) return;
+    this.emit({ type: 'models-changed' });
+    void this.persistLimits();
+  }
+
+  private async persistLimits(): Promise<void> {
+    if (!this.directory) return;
+    const path = join(this.directory, 'model-limits.json');
+    const data: Record<string, number> = {};
+    for (const [id, at] of this.modelLimits) {
+      if (Date.now() - at <= Engine.LIMIT_TTL) data[id] = at;
+      else this.modelLimits.delete(id);
+    }
+    try { await writeFile(path, JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
+  }
+
+  private async loadLimits(): Promise<void> {
+    if (!this.directory) return;
+    try {
+      const parsed = JSON.parse(await readFile(join(this.directory, 'model-limits.json'), 'utf8')) as Record<string, unknown>;
+      const now = Date.now();
+      this.modelLimits.clear();
+      for (const [id, at] of Object.entries(parsed)) {
+        if (typeof at === 'number' && now - at <= Engine.LIMIT_TTL) this.modelLimits.set(id, at);
+      }
+    } catch { /* first run or corrupt file */ }
   }
 
   private isLimited(id: string): boolean {
@@ -255,15 +304,15 @@ export class Engine {
   private compacting = new Set<string>();
   private attention?: AttentionLog;
   private skillsDirectory = '';
-  private backgrounded = new Map<string, number>();
 
-  constructor(private readonly root: string, private readonly cli: string, private readonly emit: (event: AppEvent) => void) {}
+  constructor(private readonly root: string, private readonly cli: string, private readonly emit: (event: AppEvent) => void, private readonly browser?: EngineBrowserHooks) {}
 
   async start(directory: string, providers: ProviderInput[], mcp: McpServer[], workspaces: string[] = []): Promise<void> {
     await this.stop();
     this.stopped = false;
     this.directory = directory; this.providers = providers; this.mcp = mcp;
     this.workspaces = [...new Set(workspaces.filter((path) => path && path !== directory))];
+    await this.loadLimits();
     this.status = { state: 'starting', detail: 'Starting local engine' };
     this.emit({ type: 'engine', status: this.status });
     await Promise.all(['config', 'data', 'cache', 'state', 'home'].map((name) => mkdir(join(this.root, name), { recursive: true, mode: 0o700 })));
@@ -347,6 +396,20 @@ export class Engine {
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
     }
+  }
+
+  // Live connector health straight from the engine: connected, connecting, off, or failed with a reason.
+  async mcpStatuses(): Promise<McpRuntimeStatus[]> {
+    if (this.stopped) return [];
+    return mapMcpStatus(await this.client.mcp.list());
+  }
+
+  // Ask the engine to (re)connect one connector, e.g. after fixing a missing tool; returns fresh statuses.
+  async connectMcp(name: string): Promise<McpRuntimeStatus[]> {
+    if (this.stopped) throw new Error('The local engine is not running.');
+    if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) throw new Error('Unknown connector.');
+    await this.client.mcp.connect({ server: name });
+    return this.mcpStatuses();
   }
 
   private event(event: { type: string; data?: unknown }): void {
@@ -449,6 +512,7 @@ export class Engine {
 
   async createSession(title = 'New task'): Promise<SessionSummary> {
     const session = await this.client.session.create({ location: { directory: this.directory }, title: title.trim() || 'New task', agent: 'build', permissions: sessionRules('ask') });
+    this.browser?.attach(session.id, this.directory);
     return locatedSession(session, false, this.directory);
   }
 
@@ -582,7 +646,7 @@ export class Engine {
     const entry = this.autoSessions.get(sessionId);
     if (!entry) { this.sessionChanged(sessionId); return; }
     if (isLimitError(detail) && entry.current) this.recordLimit(entry.current);
-    const models = await this.listModels().catch(() => [] as ModelOption[]);
+    const models = (await this.listModels().catch(() => [] as ModelOption[])).filter(model => !model.limited);
     const candidates = autoModelCandidates(models, entry.settings);
     const next = candidates.find((candidate) => !entry.tried.has(candidate.id));
     if (!next) {
@@ -599,6 +663,7 @@ export class Engine {
       await this.client.session.prompt({
         sessionID: sessionId,
         text: 'The previous attempt stopped because the model hit a limit. Continue exactly from where you left off, without repeating finished work.',
+        metadata: { relay: { autoResume: true, model: next.id } },
       });
     } catch (error) {
       this.autoSessions.delete(sessionId);
@@ -617,7 +682,11 @@ export class Engine {
       ? (await this.listAgents()).filter((agent) => requestedAgents.has(agent.name)).map((agent) => ({ name: agent.name }))
       : [];
     const context: ContextBlock[] = Array.isArray(input.context) ? input.context : [];
-    const composed = composeMessage(input.text, context);
+    const projectInstructions = await loadProjectInstructions(this.directory);
+    const withProjectInstructions: ContextBlock[] = projectInstructions
+      ? [{ label: `Project instructions — ${projectInstructions.label}`, text: projectInstructions.text }, ...context]
+      : context;
+    const composed = composeMessage(input.text, withProjectInstructions);
     const prefix = input.planOnly
       ? 'Plan only: do not create or modify files. Inspect what you need and reply with a concrete plan, the files you would change, and the commands you would run.\n\n'
       : '';
@@ -625,9 +694,17 @@ export class Engine {
       ? `${prefix}Treat this as a goal: keep working and verifying until it is complete, and only stop when the goal is met or you are blocked.\n\n${composed}`
       : `${prefix}${composed}`;
 
-    const candidates: Array<{ id: string; variant: string }> = input.auto
-      ? autoModelCandidates(await this.listModels(), input.autoSettings)
-      : [{ id: input.model, variant: input.variant }];
+    let candidates: Array<{ id: string; variant: string }>;
+    if (!input.auto) {
+      candidates = [{ id: input.model, variant: input.variant }];
+    } else {
+      const models = await this.listModels();
+      const available = models.filter(model => !model.limited);
+      candidates = autoModelCandidates(available, input.autoSettings);
+      if (!candidates.length && models.some(model => model.connected)) {
+        throw new Error('All connected models are rate-limited or no longer available. Wait for quotas to reset, update your provider model list, or add another provider.');
+      }
+    }
 
     if (!candidates.length) throw new Error('No connected model available. Configure a provider in Settings.');
 
@@ -679,24 +756,14 @@ export class Engine {
     await this.dismissSessionRequests(sessionID);
   }
 
-  async backgroundSession(sessionID: string): Promise<void> {
-    await this.client.session.background({ sessionID });
-    this.backgrounded.set(sessionID, Date.now());
-    while (this.backgrounded.size > 20) {
-      const oldest = this.backgrounded.keys().next().value;
-      if (oldest === undefined) break;
-      this.backgrounded.delete(oldest);
-    }
-  }
-
   async listBackgroundWork(): Promise<BackgroundRun[]> {
-    if (!this.backgrounded.size) return [];
-    const marks = [...this.backgrounded.entries()].map(([sessionId, startedAt]) => ({ sessionId, startedAt }));
+    const sessions = await this.listAllSessions().catch(() => [] as SessionSummary[]);
+    const running = sessions.filter((session) => session.status === 'running');
     const logs = new Map<string, string[]>();
-    await Promise.all(marks.map(async ({ sessionId }) => {
+    await Promise.all(running.map(async ({ id }) => {
       try {
-        const messages = await this.getMessages(sessionId);
-        logs.set(sessionId, messages.flatMap((message) => {
+        const messages = await this.getMessages(id);
+        logs.set(id, messages.flatMap((message) => {
           const prefix = message.role === 'user' ? 'You' : message.role === 'system' ? 'System' : 'Agent';
           const text = message.parts
             .flatMap((part) => part.type === 'text' && part.text.trim() ? [`${prefix}: ${part.text.trim()}`] : [])
@@ -704,10 +771,10 @@ export class Engine {
           return text ? [text] : [];
         }).slice(-24));
       } catch {
-        // A task can finish or be removed while its log is being read; keep the run visible without logs.
+        // A task can finish while its log is being read; keep the run visible without logs.
       }
     }));
-    return buildBackgroundRuns(marks, await this.listAllSessions().catch(() => []), logs);
+    return buildBackgroundRuns(sessions, logs);
   }
 
   private async dismissSessionRequests(sessionID: string): Promise<void> {
@@ -889,6 +956,7 @@ export class Engine {
 
   async stop(): Promise<void> {
     this.stopped = true; this.abort?.abort(); this.abort = undefined;
+    this.browser?.disposeAll();
     this.permissions.clear();
     for (const socket of this.terminals.values()) socket.close();
     this.terminals.clear();

@@ -1,9 +1,10 @@
-import type { AccessLevel, AutoSettings, CommandOption, ContextBlock, EngineStatus, ModelOption, Preferences, QueuedMessage, SessionSummary, SkillOption } from '../shared/contracts';
+import type { AccessLevel, AgentOption, AutoSettings, CommandOption, ContextBlock, EngineStatus, McpServer, ModelOption, PluginView, Preferences, QueuedMessage, SessionSummary, SkillOption } from '../shared/contracts';
 import { byId, button, el, errorText, notify, report } from './dom';
 import { dialog } from './dialog';
-import { chooseModel } from './state';
+import { resolveInitialModel } from './state';
 import { groupModels, resolveVariant, variantLabel } from './model-menu';
 import { Dictation } from './dictation';
+import { filterMentionables, parseMentionToken, type MentionSource } from './mention';
 
 interface Draft {
   text: string; files: string[]; access: AccessLevel; variant: string; skills: string[]; command: string;
@@ -41,6 +42,12 @@ export class Composer {
   private menu: CommandOption[] = [];
   private menuIndex = 0;
   private menuOpen = false;
+  private mentionMenu = byId<HTMLElement>('mention-menu');
+  private mentionOpen = false;
+  private mentionSources: MentionSource[] = [];
+  private mentionIndex = 0;
+  private mentionGeneration = 0;
+  private mentionCache?: { agents: AgentOption[]; plugins: PluginView[]; connectors: McpServer[] };
   private preferenceSaving = false;
   private preferredVariant = '';
   private freeOnly = false;
@@ -55,8 +62,20 @@ export class Composer {
   constructor(private changed: () => void, private savePreference: (values: Partial<Pick<Preferences, 'defaultModel' | 'defaultAccess' | 'modelVariant'>>) => Promise<void>, canDictate: () => boolean) {
     this.dictation = new Dictation(this.input, canDictate);
     this.form.addEventListener('submit', event => { event.preventDefault(); void this.submit(); });
-    this.input.addEventListener('input', () => { this.sync(); this.refreshMenu(); });
+    this.input.addEventListener('input', () => { this.sync(); this.refreshMenu(); this.refreshMention(); });
     this.input.addEventListener('keydown', event => {
+      if (this.mentionOpen) {
+        if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+          event.preventDefault(); this.moveMention(event.key === 'ArrowDown' ? 1 : -1); return;
+        }
+        if (event.key === 'Enter' || event.key === 'Tab') {
+          event.preventDefault();
+          const source = this.mentionSources[this.mentionIndex];
+          if (source) this.chooseMention(source);
+          return;
+        }
+        if (event.key === 'Escape') { event.preventDefault(); this.closeMentionMenu(); return; }
+      }
       if (this.menuOpen) {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
           event.preventDefault(); this.moveMenu(event.key === 'ArrowDown' ? 1 : -1); return;
@@ -237,6 +256,7 @@ export class Composer {
     this.input.value = ''; this.files = []; this.skills = []; this.selectedSkills = [];
     this.selectedAgents = []; this.contextBlocks = []; this.planOnly = false;
     this.commands = []; this.command = ''; this.closeMenu(); this.clearSkillSuggestions();
+    this.closeMentionMenu(); this.mentionCache = undefined;
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.sync();
   }
 
@@ -259,7 +279,7 @@ export class Composer {
     this.access.value = draft?.access ?? this.access.value;
     this.access.dataset.access = this.access.value;
     this.preferredVariant = draft?.variant ?? this.preferredVariant;
-    this.closeMenu(); this.clearSkillSuggestions();
+    this.closeMenu(); this.closeMentionMenu(); this.clearSkillSuggestions();
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.renderModelLabel(); this.sync();
   }
 
@@ -274,7 +294,11 @@ export class Composer {
   private renderModels(preferred: string): void {
     const hasFree = this.models.some(model => model.free);
     const visible = this.freeOnly && hasFree ? this.models.filter(model => model.free) : this.models;
-    this.modelId = chooseModel(visible, preferred || this.modelId);
+    const resolved = resolveInitialModel(visible, preferred, this.modelId);
+    this.modelId = resolved.modelId;
+    // Auto sticks once active (fresh boot without a saved preference, or the user picked Auto);
+    // it only ends on an explicit model pick (pickModel/pickPower set autoModel = false).
+    if (!this.autoModel) this.autoModel = resolved.autoModel;
     this.free.setAttribute('aria-pressed', String(this.freeOnly));
     this.free.textContent = this.freeOnly ? 'Free only' : 'All models';
     this.renderModelLabel();
@@ -287,7 +311,7 @@ export class Composer {
   }
 
   private renderModelLabel(): void {
-    if (this.autoModel) { this.modelLabel.textContent = 'Auto (best available)'; return; }
+    if (this.autoModel && this.models.some(model => model.connected)) { this.modelLabel.textContent = 'Auto (best available)'; return; }
     const selected = this.models.find(model => model.id === this.modelId);
     if (!selected) {
       this.modelLabel.textContent = this.freeOnly ? 'No free models' : 'Configure model';
@@ -637,6 +661,132 @@ export class Composer {
     byId('command-menu').hidden = true;
   }
 
+  private refreshMention(): void {
+    const caret = this.input.selectionStart ?? this.input.value.length;
+    const token = parseMentionToken(this.input.value, caret);
+    if (!token) { this.closeMentionMenu(); return; }
+    void this.openMentionMenu(token);
+  }
+
+  private async openMentionMenu(token: { query: string }): Promise<void> {
+    const generation = ++this.mentionGeneration;
+    if (!this.mentionCache) {
+      const [agents, plugins, connectors] = await Promise.all([
+        window.relay.listAgents().catch(() => [] as AgentOption[]),
+        window.relay.listPlugins().catch(() => [] as PluginView[]),
+        window.relay.listMcp().catch(() => [] as McpServer[]),
+      ]);
+      if (generation !== this.mentionGeneration) return;
+      this.mentionCache = { agents, plugins, connectors };
+    }
+    const { agents, plugins, connectors } = this.mentionCache;
+    const files = await window.relay.searchFiles(token.query, 'files').catch(() => []);
+    if (generation !== this.mentionGeneration) return;
+    const sources: MentionSource[] = [
+      ...files.slice(0, 6).map(result => ({
+        kind: 'file' as const, id: result.path,
+        name: result.path.split('/').pop() || result.path, detail: result.path, path: result.path,
+      })),
+      ...this.skills.filter(skill => !this.selectedSkills.includes(skill.id)).map(skill => ({
+        kind: 'skill' as const, id: skill.id, name: skill.name, detail: skill.description || 'Skill', skillId: skill.id,
+      })),
+      ...agents.map(agent => ({
+        kind: 'agent' as const, id: agent.name, name: agent.name,
+        detail: agent.description || (agent.primary ? 'Primary agent' : 'Subagent'), agentName: agent.name,
+      })),
+      ...plugins.map(plugin => ({
+        kind: 'plugin' as const, id: plugin.id, name: plugin.name,
+        detail: plugin.description || `v${plugin.version}`,
+        pluginSkills: plugin.capabilities.skills.map(id => ({ id, name: this.skills.find(skill => skill.id === id)?.name ?? id })),
+      })),
+      ...connectors.map(server => ({
+        kind: 'connector' as const, id: server.name, name: server.name,
+        detail: server.type === 'local' ? (server.command ?? []).join(' ') : server.url ?? '',
+        connector: { name: server.name, type: server.type, ...(server.command ? { command: server.command } : {}), ...(server.url ? { url: server.url } : {}) },
+      })),
+    ];
+    const matches = filterMentionables(sources, token.query);
+    if (!matches.length) { this.closeMentionMenu(); return; }
+    this.mentionSources = matches;
+    this.mentionIndex = Math.min(this.mentionIndex, matches.length - 1);
+    this.mentionOpen = true;
+    this.renderMentionMenu();
+  }
+
+  private renderMentionMenu(): void {
+    const labels: Record<MentionSource['kind'], string> = { file: 'Files', skill: 'Skills', plugin: 'Plugins', agent: 'Agents', connector: 'Connectors' };
+    const rows: HTMLElement[] = [];
+    let lastKind = '';
+    this.mentionSources.forEach((source, index) => {
+      if (source.kind !== lastKind) {
+        lastKind = source.kind;
+        rows.push(el('p', 'mention-label', labels[source.kind]));
+      }
+      const item = button('', () => this.chooseMention(source), `command-option${index === this.mentionIndex ? ' active' : ''}`);
+      item.setAttribute('role', 'option');
+      item.setAttribute('aria-selected', String(index === this.mentionIndex));
+      item.append(el('span', 'command-name', source.name), el('span', 'command-description', source.detail || source.kind));
+      item.addEventListener('mousedown', event => event.preventDefault());
+      rows.push(item);
+    });
+    this.mentionMenu.replaceChildren(...rows);
+    this.mentionMenu.hidden = false;
+    this.mentionMenu.querySelectorAll('button')[this.mentionIndex]?.scrollIntoView({ block: 'nearest' });
+  }
+
+  private moveMention(delta: number): void {
+    if (!this.mentionSources.length) return;
+    this.mentionIndex = (this.mentionIndex + delta + this.mentionSources.length) % this.mentionSources.length;
+    this.renderMentionMenu();
+  }
+
+  private closeMentionMenu(): void {
+    this.mentionOpen = false; this.mentionSources = []; this.mentionIndex = 0;
+    this.mentionGeneration++;
+    this.mentionMenu.hidden = true;
+  }
+
+  private chooseMention(source: MentionSource): void {
+    const caret = this.input.selectionStart ?? this.input.value.length;
+    const token = parseMentionToken(this.input.value, caret);
+    if (token) this.input.value = this.input.value.slice(0, token.start) + this.input.value.slice(Math.min(token.end, this.input.value.length));
+    this.closeMentionMenu();
+    if (!this.session) { this.sync(); return; }
+    if (source.kind === 'file' && source.path) {
+      this.attach(source.path);
+      this.sync();
+      return;
+    }
+    if (source.kind === 'skill' && source.skillId) {
+      this.attachSkill(source.skillId);
+      return;
+    }
+    if (source.kind === 'agent' && source.agentName) {
+      if (!this.selectedAgents.includes(source.agentName)) this.selectedAgents.push(source.agentName);
+      this.renderTags(); this.sync(); this.input.focus();
+      return;
+    }
+    if (source.kind === 'plugin') {
+      const attachable = (source.pluginSkills ?? []).map(skill => skill.id).filter(id => this.skills.some(skill => skill.id === id) && !this.selectedSkills.includes(id));
+      if (!attachable.length) {
+        notify('This plugin has no skills to attach here. Run its commands by typing / in the composer.', true);
+        this.input.focus();
+        return;
+      }
+      for (const id of attachable) this.selectedSkills.push(id);
+      this.renderSkills(); this.sync(); this.input.focus();
+      return;
+    }
+    if (source.kind === 'connector' && source.connector) {
+      const server = source.connector;
+      const described = server.type === 'local' ? `Local connector running ${((server.command ?? []).join(' ')) || server.name}` : `Remote connector at ${server.url ?? server.name}`;
+      const added = this.addContext(`Connector: ${server.name}`, `${described}. ${source.detail ?? ''} Its tools are available in this task — prefer them when they fit.`);
+      if (!added) notify('Remove a context tag first, or open a task before mentioning a connector.', true);
+      return;
+    }
+    this.sync();
+  }
+
   private chooseCommand(command: CommandOption): void {
     this.command = command.name;
     this.input.value = '';
@@ -655,7 +805,7 @@ export class Composer {
     if (this.modelButton.disabled) this.closeModelMenu();
     this.access.disabled = this.preferenceSaving;
     this.free.disabled = !this.models.some(model => model.free);
-    this.send.disabled = !ready || (!this.autoModel && !this.modelId) || (!this.input.value.trim() && !this.command) || blocked;
+    this.send.disabled = !ready || (this.autoModel ? !this.models.some(model => model.connected) : !this.modelId) || (!this.input.value.trim() && !this.command) || blocked;
     this.interrupt.hidden = !running;
     this.interrupt.disabled = this.stopping.has(id) || !this.ready;
     this.send.hidden = running && !this.inputWhileRunning;

@@ -525,8 +525,14 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       busy(true); status.textContent = 'Saving…';
       void window.relay.saveProvider(input).then(async state => {
         key.value = ''; apply(state); renderSummaries(); renderGallery(); updateFields();
-        status.textContent = 'Saved. Credentials have not been verified by this form.';
+        status.textContent = 'Saved. Checking whether the engine lists connected models…';
         await refreshModels();
+        try {
+          const connected = (await window.relay.listModels()).filter(model => model.providerID === activeProvider && model.connected);
+          status.textContent = connected.length
+            ? `Saved — engine lists ${connected.length} connected model${connected.length === 1 ? '' : 's'} for ${providerName(activeProvider)}.`
+            : 'Saved, but the engine reports no connected models for this provider — check the API key and base URL.';
+        } catch { status.textContent = 'Saved, but the model list could not be refreshed.'; }
       }).catch(error => { status.textContent = ''; modal.fail(error); }).finally(() => busy(false));
     });
     remove.addEventListener('click', () => {

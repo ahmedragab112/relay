@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nearBottom, chooseModel, isDirty, externalURL, parsePatch, reloadTransition, shouldDismissAttention } from '../src/renderer/state.js';
+import { nearBottom, chooseModel, resolveInitialModel, isDirty, externalURL, parsePatch, reloadTransition, shouldDismissAttention } from '../src/renderer/state.js';
 
 // These catch forced scrolling, unavailable model selection, lost edits, unsafe
 // navigation, incorrect diff classification, and dropped streaming reloads.
@@ -19,6 +19,24 @@ test('model selection uses only actual connected models', () => {
   assert.equal(chooseModel(models, 'live/b'), 'live/b');
   assert.equal(chooseModel(models, 'offline/m'), 'live/a');
   assert.equal(chooseModel([], 'imaginary/model'), '');
+});
+
+test('initial selection defaults to Auto and settles on an explicit pick', () => {
+  const models = [
+    { id: 'live/a', providerID: 'live', modelID: 'a', name: 'A', connected: true },
+    { id: 'live/b', providerID: 'live', modelID: 'b', name: 'B', connected: true },
+    { id: 'offline/m', providerID: 'offline', modelID: 'm', name: 'Offline', connected: false },
+  ];
+  // Nothing saved, nothing picked: the composer starts on Auto and lets the engine pick.
+  assert.deepEqual(resolveInitialModel(models, '', ''), { modelId: '', autoModel: true });
+  // A saved preference wins over the Auto default.
+  assert.deepEqual(resolveInitialModel(models, 'live/b', ''), { modelId: 'live/b', autoModel: false });
+  // A session pick whose preference is still saving is kept, not clobbered back to Auto.
+  assert.deepEqual(resolveInitialModel(models, '', 'live/a'), { modelId: 'live/a', autoModel: false });
+  // An invalid saved preference falls back to the first connected model, not Auto.
+  assert.deepEqual(resolveInitialModel(models, 'imaginary/model', ''), { modelId: 'live/a', autoModel: false });
+  // No connected models: Auto is still the honest initial state; the composer keeps send disabled.
+  assert.deepEqual(resolveInitialModel([], '', ''), { modelId: '', autoModel: true });
 });
 
 test('dirty detection preserves edits made while a save is pending', () => {

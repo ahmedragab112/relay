@@ -8,19 +8,25 @@
   <title>Relay</title>
 </head>
 <body>
+  <a class="skip-link" href="#conversation">Skip to chat</a>
   <main class="workspace" id="app">
     <header class="titlebar">
       <button id="sidebar-button" class="icon-button sidebar-toggle" aria-label="Toggle sidebar" aria-pressed="true" title="Show or hide the sidebar">
-        <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M9.5 4.5v15"/></svg>
       </button>
-      <span class="brand"><span class="brand-mark" aria-hidden="true">↳</span> relay</span>
+      <span class="brand"><span class="brand-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="24" height="24" role="img" aria-label="Relay logo" style="color:var(--logo-ink)"><circle cx="12" cy="12" r="5.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="9.4 4.7" transform="rotate(-32 12 12)"/><circle cx="7.8" cy="17.4" r="1.15" fill="currentColor"/><circle cx="16.2" cy="6.6" r="1.15" fill="currentColor"/></svg></span> relay</span>
       <span class="title-divider"></span>
       <button id="workspace-button" class="workspace-button" title="Open or switch project">Open project</button>
       <span class="grow"></span>
       <button id="palette-button" class="search-button">Search tasks or commands <kbd data-shortcut="Mod+K">⌘ K</kbd></button>
       <span class="grow"></span>
-      <button id="terminal-button" class="icon-button" aria-label="Open terminal" title="Open terminal">&gt;_</button>
-      <button id="inspector-button" class="icon-button" aria-label="Toggle file inspector" aria-pressed="true" title="File inspector">▥</button>
+      <div class="title-overflow-wrap">
+        <button id="overflow-button" class="icon-button" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" title="More actions">···</button>
+        <div id="title-overflow" class="title-overflow" role="menu" aria-label="More actions" hidden>
+          <button id="terminal-button" class="menu-item" role="menuitem"><span class="menu-glyph" aria-hidden="true">&gt;_</span><span>Open terminal</span></button>
+          <button id="inspector-button" class="menu-item" role="menuitem" aria-pressed="true"><span class="menu-glyph" aria-hidden="true">▥</span><span>File inspector</span></button>
+        </div>
+      </div>
       <div class="window-controls" role="group" aria-label="Window controls">
         <button id="window-minimize" aria-label="Minimize window" title="Minimize"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg></button>
         <button id="window-zoom" aria-label="Maximize window" title="Maximize"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="1"/></svg></button>
@@ -49,7 +55,7 @@
       <div class="conversation-wrap">
         <div id="branch-bar" class="branch-bar" role="navigation" aria-label="Task branches" hidden></div>
         <div id="conversation" class="conversation" tabindex="0" aria-label="Conversation history"><div class="empty-state"><h2>A calmer place to build.</h2><p>Loading your local workspace…</p></div></div>
-        <button id="scroll-bottom" class="scroll-bottom" type="button" title="Scroll to latest message" aria-label="Scroll to latest message" hidden><svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg></button>
+        <button id="scroll-bottom" class="scroll-bottom" type="button" title="Scroll to latest message" aria-label="Scroll to latest message" hidden><svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v13"/><path d="m6 12 6 6 6-6"/></svg></button>
       </div>
       <div id="requests" class="requests" aria-label="Agent requests"></div>
       <div id="thinking" class="thinking" role="status" aria-live="polite" aria-atomic="true" title="Relay is working. You can keep typing; long builds and downloads can keep running in the background." hidden>
@@ -60,6 +66,7 @@
       <div class="composer-wrap">
         <div id="review-card" class="review-card" hidden></div>
         <div id="command-menu" class="command-menu" role="listbox" aria-label="Slash commands" hidden></div>
+        <div id="mention-menu" class="command-menu" role="listbox" aria-label="Mentions" hidden></div>
         <div id="queued-messages" class="queued-messages" aria-label="Queued messages" aria-live="polite"></div>
         <div id="mode-chips" class="attachments"></div>
         <div id="command-chips" class="attachments"></div>
@@ -88,7 +95,7 @@
             </div>
             <span class="grow"></span>
             <button type="button" id="dictate" class="icon-button dictate-button" title="Voice dictation" aria-label="Voice dictation" aria-pressed="false" disabled>
-              <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11.5a6.5 6.5 0 0 0 13 0"/><path d="M12 18v3"/></svg>
             </button>
             <button type="button" id="interrupt" class="button danger" hidden>Stop</button>
             <button type="submit" id="send-message" class="send-button" aria-label="Send message" disabled>↑</button>

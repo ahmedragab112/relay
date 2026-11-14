@@ -49,6 +49,8 @@ export class Sessions {
   private currentId = '';
   private queued = '';
   private collapsed = new Set<string>();
+  private order = new Map<string, number>();
+  private orderClock = 0;
   private generation = 0;
   private request = 0;
   private creating = false;
@@ -59,13 +61,26 @@ export class Sessions {
   constructor(
     private selected: (session?: SessionSummary, userInitiated?: boolean) => void,
     private openFolder: (workspaceId: string) => Promise<boolean> = async () => false,
+    private onRevert: () => void = () => {},
+    private waiting: (sessionId: string) => boolean = () => false,
   ) {}
+
+  private static skeleton(): HTMLElement {
+    const list = el('div', 'task-skeleton');
+    list.setAttribute('aria-hidden', 'true');
+    for (let index = 0; index < 7; index++) {
+      const row = el('div', 'task-skeleton-row');
+      row.append(el('span', 'task-skeleton-dot'), el('span', 'task-skeleton-copy'), el('span', 'task-skeleton-meta'));
+      list.append(row);
+    }
+    return list;
+  }
 
   reset(hasWorkspace: boolean, workspaces: Workspace[] = [], currentId = ''): void {
     this.generation++; this.request++; this.workspace = hasWorkspace;
     this.workspaces = workspaces; this.currentId = currentId;
     this.items = []; this.groups = []; this.active = undefined; this.signature = '';
-    byId('task-list').replaceChildren(el('p', 'small muted', hasWorkspace ? 'Loading tasks…' : 'Open a project to begin.'));
+    byId('task-list').replaceChildren(hasWorkspace ? Sessions.skeleton() : el('p', 'small muted', 'Open a project to begin.'));
     this.selected(undefined);
   }
 
@@ -76,7 +91,8 @@ export class Sessions {
     try {
       const items = await window.relay.listAllSessions();
       if (generation !== this.generation || request !== this.request || this.disposed) return;
-      this.items = [...items].sort((a, b) => b.updatedAt - a.updatedAt);
+      for (const item of items) if (!this.order.has(item.id)) this.order.set(item.id, ++this.orderClock);
+      this.items = [...items].sort((a, b) => (this.order.get(b.id) ?? 0) - (this.order.get(a.id) ?? 0));
       this.groups = groupTasks(this.items, this.workspaces, this.currentId);
       const wanted = this.queued || this.active?.id;
       this.queued = '';
@@ -157,6 +173,20 @@ export class Sessions {
         }
       } catch (error) { modal.fail(error); }
       finally { modal.busy(false); }
+    }), button('Revert task changes', async () => {
+      modal.busy(true);
+      try {
+        const changes = await window.relay.getChanges(session.id);
+        if (!changes.length) { modal.fail('This task has not changed any files.'); return; }
+        const count = changes.length;
+        if (!await confirmAction('Revert task changes?', `Revert ${count} file${count === 1 ? '' : 's'} this task changed? Files will be restored to how they were before the task ran. This cannot be undone.`, 'Revert changes')) return;
+        for (const change of [...changes].reverse()) {
+          try { await window.relay.undoChange(change.path); } catch { /* best effort — keep going */ }
+        }
+        modal.root.close();
+        if (generation === this.generation) this.onRevert();
+      } catch (error) { modal.fail(error); }
+      finally { modal.busy(false); }
     }), button('Delete task', async () => {
       if (!await confirmAction('Delete task?', `Delete “${session.title}” and its conversation? This cannot be undone. Workspace files are not reverted.`, 'Delete task')) return;
       modal.busy(true);
@@ -187,7 +217,11 @@ export class Sessions {
   }
 
   private snapshot(): string {
-    return JSON.stringify([this.groups, this.active?.id, [...this.collapsed].sort()]);
+    const skeleton = this.groups.map(group => [
+      group.id, group.current ? 'c' : '',
+      group.sessions.map(session => `${session.id}:${session.title}:${session.status}:${session.fork?.sessionId ?? ''}`).join(','),
+    ].join('|')).join(';;');
+    return `${skeleton}::${this.active?.id ?? ''}::${[...this.collapsed].sort().join(',')}`;
   }
 
   private group(group: TaskGroup): HTMLElement {
@@ -286,14 +320,17 @@ export class Sessions {
     if (active) control.setAttribute('aria-current', 'true');
     const forked = Boolean(session.fork);
     if (forked) control.classList.add('forked');
-    control.append(session.status === 'running' ? taskLoader() : el('span', `task-dot ${session.status}${forked ? ' forked' : ''}`));
+    control.append(session.status === 'running' && this.waiting(session.id)
+      ? el('span', 'task-dot waiting')
+      : session.status === 'running' ? taskLoader() : el('span', `task-dot ${session.status}${forked ? ' forked' : ''}`));
     const copy = el('span', 'task-copy');
     const date = new Date(session.updatedAt);
     const when = Number.isNaN(date.getTime()) ? '' : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const state = session.status === 'running' ? 'Running' : session.status === 'error' ? 'Error' : 'Idle';
+    const blocked = session.status === 'running' && this.waiting(session.id);
+    const state = blocked ? 'Waiting for you' : session.status === 'running' ? 'Running' : session.status === 'error' ? 'Error' : 'Idle';
     const parentTitle = session.fork ? titles.get(session.fork.sessionId) ?? 'an earlier task' : '';
     const meta = parentTitle ? `⑂ ${parentTitle}${state === 'Idle' ? '' : ` · ${state}`}` : state;
-    copy.append(el('span', 'task-name', session.title), el('span', 'task-time', `${meta}${when ? ` · ${when}` : ''}`));
+    copy.append(el('span', 'task-name', session.title), el('span', `task-time${blocked ? ' waiting' : ''}`, `${meta}${when ? ` · ${when}` : ''}`));
     control.append(copy);
     if (branches) {
       const badge = el('span', 'task-branch-count');

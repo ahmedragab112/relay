@@ -1,10 +1,11 @@
 import type {
-  CatalogSkillEntry, McpServer, PluginCapabilities, PluginCatalogEntry, PluginPreview, PluginView, SessionSummary,
+  CatalogSkillEntry, ConnectorCatalogEntry, McpRuntimeStatus, McpServer, PluginCapabilities, PluginCatalogEntry, PluginPreview, PluginView, SessionSummary,
   SkillLibraryEntry, Workspace,
 } from '../shared/contracts';
 import { byId, button, el, errorText, field, notify, option, report } from './dom';
 import { confirmAction, dialog } from './dialog';
 import { filterConnectors, type ConnectorFilter } from './extension-filter';
+import { catalogIconElement, connectorIcon, pluginIcon, skillIcon } from './catalog-icons';
 import { showSkillPreview } from './skill-install';
 import { externalURL } from './state';
 import { searchTasksAndProjects } from './toolkit-search';
@@ -68,15 +69,27 @@ export class ToolsPage {
   private catalog: PluginCatalogEntry[] = [];
   private plugins: PluginView[] = [];
   private connectors: McpServer[] = [];
+  private connectorsCatalog: ConnectorCatalogEntry[] = [];
+  private connectorStatuses: McpRuntimeStatus[] = [];
+  private statusTimer: ReturnType<typeof setInterval> | undefined;
   private sessions: SessionSummary[] = [];
   private workspaces: Workspace[] = [];
   private currentWorkspaceId = '';
+  private searchTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly options: ToolsPageOptions) {
     for (const mode of MODES) {
       this.tabs[mode].addEventListener('click', () => this.selectTab(mode));
     }
-    this.search.addEventListener('input', () => { this.query = this.search.value; this.render(); });
+    this.search.addEventListener('input', () => {
+      // Typing must not rebuild a hundred cards per keystroke.
+      clearTimeout(this.searchTimer);
+      this.searchTimer = setTimeout(() => {
+        if (!this.open) return;
+        this.query = this.search.value;
+        this.render();
+      }, 120);
+    });
     this.primary.addEventListener('click', () => void this.installRemaining());
     this.secondary.addEventListener('click', () => {
       if (this.mode === 'skills') this.addSkillFromWeb();
@@ -104,6 +117,7 @@ export class ToolsPage {
     this.paintChrome();
     this.render();
     void this.reload();
+    this.syncStatusPolling();
     this.search.focus();
   }
 
@@ -113,6 +127,7 @@ export class ToolsPage {
     this.generation++;
     this.page.hidden = true;
     byId('app').classList.remove('tools-open');
+    this.syncStatusPolling();
     this.pressed();
   }
 
@@ -122,19 +137,55 @@ export class ToolsPage {
     this.filter = 'All';
     this.paintChrome();
     this.render();
+    this.syncStatusPolling();
     this.search.focus();
+  }
+
+  // Connector health is live while the Connectors tab is on screen: the engine
+  // connects local servers seconds after boot, so poll instead of guessing.
+  private syncStatusPolling(): void {
+    const wanted = this.open && this.mode === 'connectors';
+    if (wanted && !this.statusTimer) {
+      this.statusTimer = setInterval(() => void this.refreshConnectorStatus(), 4000);
+      void this.refreshConnectorStatus();
+    }
+    if (!wanted && this.statusTimer) {
+      clearInterval(this.statusTimer);
+      this.statusTimer = undefined;
+    }
+  }
+
+  private async refreshConnectorStatus(): Promise<void> {
+    const statuses = await window.relay.connectorStatus().catch(() => null);
+    if (!statuses || !this.open || this.mode !== 'connectors') return;
+    if (JSON.stringify(statuses) === JSON.stringify(this.connectorStatuses)) return;
+    this.connectorStatuses = statuses;
+    this.render();
+  }
+
+  private statusFor(name: string): McpRuntimeStatus | undefined {
+    return this.connectorStatuses.find((entry) => entry.name === name);
+  }
+
+  private async retryConnector(name: string): Promise<void> {
+    const statuses = await window.relay.connectConnector(name).catch(() => null);
+    if (!statuses) return;
+    this.connectorStatuses = statuses;
+    if (this.open && this.mode === 'connectors') this.render();
   }
 
   async reload(): Promise<void> {
     if (!this.open) return;
     const token = ++this.generation;
     try {
-      const [skills, library, catalog, plugins, connectors, sessions, state] = await Promise.all([
+      const [skills, library, catalog, plugins, connectors, connectorsCatalog, connectorStatuses, sessions, state] = await Promise.all([
         window.relay.listCatalogSkills(),
         window.relay.listLibrarySkills(),
         window.relay.listPluginCatalog(),
         window.relay.listPlugins(),
         window.relay.listMcp(),
+        window.relay.listConnectorCatalog(),
+        window.relay.connectorStatus().catch(() => [] as McpRuntimeStatus[]),
         window.relay.listAllSessions().catch(() => [] as SessionSummary[]),
         window.relay.getState(),
       ]);
@@ -144,6 +195,8 @@ export class ToolsPage {
       this.catalog = catalog;
       this.plugins = plugins;
       this.connectors = connectors;
+      this.connectorsCatalog = connectorsCatalog;
+      this.connectorStatuses = connectorStatuses;
       this.sessions = sessions;
       this.workspaces = state.workspaces;
       this.currentWorkspaceId = state.workspace?.id ?? '';
@@ -181,7 +234,7 @@ export class ToolsPage {
       ? ['All', ...new Set(this.skills.map((entry) => entry.category))]
       : this.mode === 'plugins'
         ? ['All', 'Installed', 'Available']
-        : ['All', 'Local', 'Remote', 'Enabled'];
+        : ['All', 'Local', 'Remote', 'Enabled', ...new Set(this.connectorsCatalog.map((entry) => entry.category))];
     this.chips.replaceChildren(...items.map((label) => {
       const chip = button(label, () => { this.filter = label; this.render(); }, 'extension-chip');
       chip.type = 'button';
@@ -316,9 +369,10 @@ export class ToolsPage {
     const row = el('section', 'integration-row');
     const head = el('div', 'row');
     const identity = el('div', 'row row-identity');
+    const category = this.skills.find((skill) => skill.id === entry.id)?.category ?? '';
     const source = el('span', 'pill', entry.source === 'Bundled with Relay' ? 'Curated' : sourceLabel(entry.source));
     source.title = entry.source || 'Installed locally';
-    identity.append(el('strong', '', entry.name), el('span', 'pill', 'Skill'), source);
+    identity.append(catalogIconElement(skillIcon(category)), el('strong', '', entry.name), el('span', 'pill', 'Skill'), source);
     const remove = button('Remove', () => void this.removeSkill(entry), 'text-button danger');
     remove.title = `Remove ${entry.name} from this Mac`;
     head.append(identity, remove);
@@ -330,7 +384,7 @@ export class ToolsPage {
     const installed = this.installedSkill(entry.id);
     const card = el('article', 'tools-card');
     const head = el('div', 'tools-card-head');
-    head.append(el('strong', '', entry.name), el('span', 'pill', entry.category));
+    head.append(catalogIconElement(skillIcon(entry.category)), el('strong', '', entry.name), el('span', 'pill', entry.category));
     if (installed) head.append(el('span', 'pill', 'Installed'));
     card.append(head, el('p', 'tools-card-copy', entry.description));
     const actions = el('div', 'tools-card-actions');
@@ -396,7 +450,7 @@ export class ToolsPage {
     const row = el('section', 'integration-row');
     const head = el('div', 'row');
     const identity = el('div', 'row row-identity');
-    identity.append(el('strong', '', plugin.name), el('span', 'pill', `v${plugin.version}`),
+    identity.append(catalogIconElement(pluginIcon(plugin.name)), el('strong', '', plugin.name), el('span', 'pill', `v${plugin.version}`),
       el('span', 'pill', !plugin.available ? 'Files missing' : plugin.enabled ? 'Enabled' : 'Disabled'));
     const actions = el('div', 'row');
     const toggle = button(plugin.enabled ? 'Disable' : 'Enable', async () => {
@@ -418,7 +472,7 @@ export class ToolsPage {
     const installed = this.installedPlugin(entry.id);
     const card = el('article', 'tools-card');
     const head = el('div', 'tools-card-head');
-    head.append(el('strong', '', entry.name), el('span', 'pill', `v${entry.version}`));
+    head.append(catalogIconElement(pluginIcon(entry.name)), el('strong', '', entry.name), el('span', 'pill', `v${entry.version}`));
     if (installed) head.append(el('span', 'pill', 'Installed'));
     card.append(head, el('p', 'tools-card-copy', entry.description));
     if (entry.capabilities.commands.length) {
@@ -462,34 +516,92 @@ export class ToolsPage {
     } catch (error) { report(`Could not remove ${plugin.name}`, error); }
   }
 
+  private visibleCatalogConnectors(): ConnectorCatalogEntry[] {
+    return this.connectorsCatalog.filter((entry) => {
+      if (this.filter === 'Local' && entry.type !== 'local') return false;
+      if (this.filter === 'Remote' && entry.type !== 'remote') return false;
+      if (this.filter === 'Enabled' && !entry.configured) return false;
+      if (this.filter !== 'All' && this.filter !== 'Local' && this.filter !== 'Remote' && this.filter !== 'Enabled' && entry.category !== this.filter) return false;
+      return this.matches(this.query, entry.name, entry.description, entry.category);
+    });
+  }
+
   private connectorSections(): HTMLElement[] {
-    const items = this.visibleConnectors();
-    const section = el('section', 'tools-section');
-    section.append(el('h3', '', `Connectors · ${items.length}`),
+    const configured = this.visibleConnectors();
+    const popular = this.visibleCatalogConnectors();
+    const yours = el('section', 'tools-section');
+    yours.append(el('h3', '', `Your connectors · ${configured.length}`),
       el('p', '', 'Connectors are MCP servers that give the agent extra tools. Local servers run commands on this Mac; remote servers use an HTTP URL. Every change is confirmed by the app.'));
-    if (!items.length) {
-      section.append(el('p', 'tools-empty', this.connectors.length ? 'No connectors match that search.' : 'No connectors configured yet. Add an MCP server to get started.'));
+    if (!configured.length) {
+      yours.append(el('p', 'tools-empty', this.connectors.length ? 'No connectors match that search.' : 'No connectors configured yet. Add one from the popular list below.'));
     } else {
       const list = el('div', 'tools-installed');
-      for (const server of items) list.append(this.connectorRow(server));
-      section.append(list);
+      for (const server of configured) list.append(this.connectorRow(server));
+      yours.append(list);
     }
-    return [section];
+    const catalog = el('section', 'tools-section');
+    catalog.append(el('h3', '', `Popular connectors · ${popular.length}`),
+      el('p', '', 'One hundred popular MCP connectors bundled with Relay. Adding one fills in the confirmation form so you can review the exact command or URL before it is saved.'));
+    if (!popular.length) {
+      catalog.append(el('p', 'tools-empty', 'No popular connectors match that search.'));
+    } else {
+      const grid = el('div', 'tools-grid');
+      for (const entry of popular) grid.append(this.connectorCatalogCard(entry));
+      catalog.append(grid);
+    }
+    return [yours, catalog];
+  }
+
+  private connectorStatusPill(server: McpServer): HTMLElement {
+    const status = this.statusFor(server.name);
+    if (!status) return el('span', 'pill', server.enabled ? 'Enabled' : 'Disabled');
+    const label = status.status === 'connected' ? 'Connected' : status.status === 'pending' ? 'Connecting…' : status.status === 'disabled' ? 'Off' : 'Failed';
+    const pill = el('span', `pill status-${status.status}`, label);
+    if (status.error) pill.title = status.error;
+    return pill;
   }
 
   private connectorRow(server: McpServer): HTMLElement {
     const row = el('section', 'integration-row');
     const head = el('div', 'row');
     const identity = el('div', 'row row-identity');
-    identity.append(el('strong', '', server.name), el('span', 'pill', server.type === 'local' ? 'Local' : 'Remote'), el('span', 'pill', server.enabled ? 'Enabled' : 'Disabled'));
+    identity.append(catalogIconElement(connectorIcon(server.name, server.type)), el('strong', '', server.name), el('span', 'pill', server.type === 'local' ? 'Local' : 'Remote'), this.connectorStatusPill(server));
     const actions = el('div', 'row');
     const toggle = button(server.enabled ? 'Disable' : 'Enable', () => void this.saveServer({ ...server, enabled: !server.enabled }), 'text-button');
-    const edit = button('Edit', () => this.editServer(server), 'text-button');
+    const edit = button('Edit', () => this.editServer(server, true), 'text-button');
     const remove = button('Remove', () => void this.removeServer(server), 'text-button danger');
     actions.append(toggle, edit, remove);
+    const status = this.statusFor(server.name);
+    if (status?.status === 'failed') {
+      const retry = button('Retry', () => void this.retryConnector(server.name), 'text-button');
+      retry.setAttribute('aria-label', `Retry connector ${server.name}`);
+      actions.append(retry);
+    }
     head.append(identity, actions);
     row.append(head, el('p', '', server.type === 'local' ? (server.command ?? []).join(' ') : server.url ?? ''));
+    if (status?.error) row.append(el('p', 'connector-error', status.error));
     return row;
+  }
+
+  private connectorCatalogCard(entry: ConnectorCatalogEntry): HTMLElement {
+    const card = el('article', 'tools-card');
+    const head = el('div', 'tools-card-head');
+    head.append(catalogIconElement(connectorIcon(entry.name, entry.type)), el('strong', '', entry.name), el('span', 'pill', entry.type === 'local' ? 'Local' : 'Remote'));
+    if (entry.configured) {
+      const configuredServer = this.connectors.find(server => server.name === entry.name);
+      const status = this.statusFor(entry.name);
+      head.append(configuredServer && status ? this.connectorStatusPill(configuredServer) : el('span', 'pill', 'Configured'));
+    }
+    card.append(head, el('p', 'tools-card-copy', entry.description), el('p', 'small muted', entry.category));
+    const actions = el('div', 'tools-card-actions');
+    const configuredServer = entry.configured ? this.connectors.find((server) => server.name === entry.name) : undefined;
+    const draft: McpServer = {
+      name: entry.name, type: entry.type, enabled: true,
+      ...(entry.command ? { command: entry.command } : {}), ...(entry.url ? { url: entry.url } : {}),
+    };
+    actions.append(button(entry.configured ? 'Edit' : 'Add', () => configuredServer ? this.editServer(configuredServer, true) : this.editServer(draft), 'button primary'));
+    card.append(actions);
+    return card;
   }
 
   private async saveServer(server: McpServer): Promise<void> {
@@ -518,15 +630,15 @@ export class ToolsPage {
     finally { this.busy = false; }
   }
 
-  private editServer(existing?: McpServer): void {
+  private editServer(draft?: McpServer, lockName = false): void {
     if (this.busy) return;
-    const editor = dialog(existing ? `Edit ${existing.name}` : 'Add connector');
+    const editor = dialog(draft && lockName ? `Edit ${draft.name}` : draft ? `Add ${draft.name}` : 'Add connector');
     const form = el('form');
-    const name = el('input'); name.required = true; name.value = existing?.name ?? ''; name.readOnly = !!existing;
-    const type = el('select'); type.append(option('local', 'Local command'), option('remote', 'Remote URL')); type.value = existing?.type ?? 'local';
-    const command = el('textarea'); command.value = existing?.command ? JSON.stringify(existing.command) : ''; command.placeholder = '["executable", "argument"]'; command.spellcheck = false;
-    const url = el('input'); url.type = 'url'; url.value = existing?.url ?? ''; url.placeholder = 'https://…';
-    const enabled = el('input'); enabled.type = 'checkbox'; enabled.checked = existing?.enabled ?? true;
+    const name = el('input'); name.required = true; name.value = draft?.name ?? ''; name.readOnly = lockName;
+    const type = el('select'); type.append(option('local', 'Local command'), option('remote', 'Remote URL')); type.value = draft?.type ?? 'local';
+    const command = el('textarea'); command.value = draft?.command ? JSON.stringify(draft.command) : ''; command.placeholder = '["executable", "argument"]'; command.spellcheck = false;
+    const url = el('input'); url.type = 'url'; url.value = draft?.url ?? ''; url.placeholder = 'https://…';
+    const enabled = el('input'); enabled.type = 'checkbox'; enabled.checked = draft?.enabled ?? true;
     const commandField = field('Command and arguments (JSON array)', command, 'Each argument is a separate string. No shell expansion is applied by this form.');
     const urlField = field('Server URL', url);
     const enabledField = el('label', 'choice'); enabledField.append(enabled, el('span', '', 'Enabled'));

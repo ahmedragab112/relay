@@ -56,6 +56,32 @@ const preview = createServer((request, response) => {
         response.end('data: [DONE]\n\n');
         return;
       }
+      if (body.includes('relay-edit') && /"role":"tool"/.test(body) === false) {
+        response.writeHead(200, headers);
+        const editArgs = JSON.stringify({ path: 'README.md', oldString: 'Original readme.', newString: 'Edited by the agent for the review card.' });
+        response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_relay_edit', type: 'function', function: { name: 'edit', arguments: editArgs } }] }, finish_reason: null }] })}\n\n`);
+        response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 } })}\n\n`);
+        response.end('data: [DONE]\n\n');
+        return;
+      }
+      if (body.includes('relay-browser') && /"role":"tool"/.test(body) === false) {
+        // Code Mode: the agent must reach Relay's own (hidden) browser window through the execute tool.
+        const code = [
+          `const tab = await tools.browser.tabs.open({ url: ${JSON.stringify(`${previewURL}/page`)} })`,
+          'await tools.browser.wait({ tabID: tab.id, condition: "load" })',
+          'const snap = await tools.browser.snapshot({ tabID: tab.id })',
+          'return snap.content',
+        ].join('\n');
+        response.writeHead(200, headers);
+        response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: { role: 'assistant', tool_calls: [{ index: 0, id: 'call_relay_execute', type: 'function', function: { name: 'execute', arguments: JSON.stringify({ code }) } }] }, finish_reason: null }] })}\n\n`);
+        response.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 12, total_tokens: 32 } })}\n\n`);
+        response.end('data: [DONE]\n\n');
+        return;
+      }
+      if (body.includes('relay-browser')) {
+        send(body.includes('Relay preview page') ? 'Browser check: SNAPSHOT_OK' : 'Browser check: SNAPSHOT_MISSING');
+        return;
+      }
       if (body.includes('relay-tool')) send('The README describes the test project.');
       else if (body.includes('relay-hold')) setTimeout(() => send(), 10_000);
       else if (body.includes('relay-slow')) setTimeout(() => send(), 4000);
@@ -95,7 +121,7 @@ async function launch() {
   await app.evaluate(({ dialog }, { pluginZip }) => {
     dialog.showMessageBox = async (...args) => {
       const options = (args.length > 1 ? args[1] : args[0]) ?? {};
-      return { response: options.title === 'Open a terminal?' ? 1 : 0, checkboxChecked: false };
+      return { response: options.title === 'Open a terminal?' || options.title === 'Enable MCP server?' ? 1 : 0, checkboxChecked: false };
     };
     dialog.showOpenDialog = async (...args) => {
       const options = (args.length > 1 ? args[1] : args[0]) ?? {};
@@ -132,7 +158,7 @@ console.log('Launching onboarding state');
 await launch();
 assert.equal(await text('#workspace-path'), 'No project open');
 assert.match(await text('#engine-status'), /Engine stopped/);
-assert.match(await text('#conversation'), /A calmer place to build/);
+assert.match(await text('#conversation'), /Build with your own models/);
 assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.relay), 'object');
@@ -144,7 +170,7 @@ const settingsDir = join(data, 'relay', 'settings');
 await mkdir(settingsDir, { recursive: true });
 await writeFile(join(settingsDir, 'settings.json'), JSON.stringify({
   version: 1,
-  preferences: { theme: 'dark', defaultModel: 'custom::test-model', activeWorkspaceId: workspaceId(projectPath), dictation: { provider: 'custom', model: 'whisper-1' } },
+  preferences: { theme: 'dark', activeWorkspaceId: workspaceId(projectPath), dictation: { provider: 'custom', model: 'whisper-1' } },
   workspaces: [
     { id: workspaceId(projectPath), path: projectPath, name: basename(projectPath), lastOpened: Date.now() },
     { id: workspaceId(pastProjectPath), path: pastProjectPath, name: basename(pastProjectPath), lastOpened: Date.now() - 60_000 },
@@ -186,11 +212,11 @@ console.log('Sending a message to the test model');
 await waitFor(() => !document.querySelector('#prompt')?.disabled, 20_000);
 
 console.log('Choosing the model from one dropdown that reveals its power');
-await waitFor(() => /test-model/.test(document.querySelector('#model-label')?.textContent ?? ''), 20_000);
+await waitFor(() => document.querySelector('#model-label')?.textContent === 'Auto (best available)', 20_000);
 assert.equal(await page.locator('#model-select, #power-select').count(), 0, 'the composer still used separate model and power selects');
 await page.click('#model-button');
 await waitFor(() => document.querySelector('#model-menu')?.hidden === false, 10_000);
-assert.equal(await page.locator('#model-menu .model-entry.selected').count(), 1, 'the model dropdown did not mark the active model');
+assert.equal(await page.locator('#model-menu .model-entry.selected').count(), 1, 'the model dropdown did not mark the Auto entry as selected on a fresh preference');
 const modelMenu = await page.evaluate(async () => {
   const models = await window.relay.listModels();
   const expected = models.filter(model => model.variants?.length).length;
@@ -202,8 +228,13 @@ const modelMenu = await page.evaluate(async () => {
   };
 });
 assert.equal(modelMenu.shown, modelMenu.expected, 'models with power levels did not show them inline in the dropdown');
-assert.equal(modelMenu.selectedRows.includes('Default'), modelMenu.selectedRows.length > 0, 'the selected model was missing its inline power choices');
+assert.equal(modelMenu.selectedRows.length, 0, 'the Auto entry should not show power choices');
 await page.screenshot({ path: join(artifacts, 'model-menu.png') });
+// Picking a concrete model persists the preference the rest of the suite relies on.
+await page.locator('#model-menu .model-option', { hasText: 'test-model' }).first().click();
+await waitFor(() => /test-model/.test(document.querySelector('#model-label')?.textContent ?? ''), 10_000);
+await page.click('#model-button');
+await waitFor(() => document.querySelector('#model-menu')?.hidden === false, 10_000);
 await page.click('#model-menu .model-option.selected');
 await waitFor(() => document.querySelector('#model-menu')?.hidden === true, 10_000);
 assert.match(await text('#model-label'), /test-model/);
@@ -311,32 +342,32 @@ for (const task of runningTasks) assert.equal(task.loaders, 3, `running task "${
 for (const task of sidebarTasks.filter(task => !task.running)) assert.equal(task.loaders, 0, `idle task "${task.title}" showed a working loader`);
 await page.screenshot({ path: join(artifacts, 'thinking.png') });
 
-console.log('Leaving a running task backgrounds it automatically');
+console.log('Leaving a running task keeps it running — the Activity page lists every live run');
 await page.locator('#task-list .task-group.current .task-button:not(.active)').first().click();
 await page.waitForFunction(async (id) => {
   const runs = await window.relay.backgroundActivity();
   return runs.some((run) => run.id === id && run.status === 'running');
 }, backgroundedId, { timeout: 20_000 });
 await page.click('#tab-activity');
-await waitFor(() => /Background work/.test(document.querySelector('#activity-body')?.textContent ?? ''), 20_000);
-assert.equal(await page.locator('#activity-body .activity-run').count(), 1, 'Activity did not list the backgrounded task');
+await waitFor(() => /Running now/.test(document.querySelector('#activity-body')?.textContent ?? ''), 20_000);
+assert.equal(await page.locator('#activity-body .activity-run').count(), 1, 'Activity did not list the running task');
 const backgroundRun = page.locator('#activity-body .activity-run').first();
 assert.equal((await backgroundRun.locator('.activity-run-title').textContent() ?? '').trim(), backgroundedTitle);
-assert.match(await backgroundRun.locator('.activity-run-status').textContent(), /Running|Idle/);
+assert.match(await backgroundRun.locator('.activity-run-status').textContent(), /Running/);
 await backgroundRun.locator('summary').click();
 await waitFor(() => document.querySelector('#activity-body .activity-run')?.open === true, 10_000);
 assert.match(await backgroundRun.locator('.activity-run-logs').textContent(), /relay-slow background check/);
 await page.screenshot({ path: join(artifacts, 'background-work.png') });
-await page.waitForFunction(async (id) => {
-  const runs = await window.relay.backgroundActivity();
-  return runs.some((run) => run.id === id && run.status !== 'running');
-}, backgroundedId, { timeout: 40_000 });
-await waitFor(() => document.querySelector('#activity-body .activity-run .activity-run-status')?.textContent === 'Idle', 40_000);
-assert.equal(await page.locator('#activity-body .activity-run').evaluate((node) => node.open), true, 'the open background run collapsed after it updated');
-assert.match(await backgroundRun.locator('.activity-run-logs').textContent(), /Hello from the test model\./);
 await backgroundRun.locator('.activity-run-actions button', { hasText: 'Open task' }).click();
 await page.waitForFunction((id) => document.querySelector('#task-list .task-button.active')?.dataset.session === id, backgroundedId, { timeout: 20_000 });
 await waitFor(() => document.querySelector('#thinking')?.hidden === true, 40_000);
+await page.waitForFunction(async (id) => {
+  const runs = await window.relay.backgroundActivity();
+  return !runs.some((run) => run.id === id);
+}, backgroundedId, { timeout: 60_000 });
+await page.click('#tab-activity');
+await page.waitForFunction((title) => ![...document.querySelectorAll('#activity-body .activity-run-title')].some((node) => (node.textContent ?? '').trim() === title), backgroundedTitle, { timeout: 20_000 });
+assert.equal(await page.locator(`#activity-body .activity-run .activity-run-title`, { hasText: backgroundedTitle }).count(), 0, 'the finished task stayed listed as running');
 
 console.log('Queuing messages while the model works, then editing, removing and steering them');
 await page.fill('#prompt', 'relay-hold queued flow');
@@ -481,6 +512,8 @@ const fullWidth = await chatWidth();
 const viewport = await page.evaluate(() => window.innerWidth);
 assert.ok(fullWidth >= viewport - 230, `the chat did not take the space of the hidden inspector (${fullWidth} of ${viewport})`);
 await page.screenshot({ path: join(artifacts, 'inspector-collapsed.png') });
+await page.click('#overflow-button');
+await waitFor(() => document.querySelector('#title-overflow')?.hidden === false);
 await page.click('#inspector-button');
 await waitFor(() => !document.querySelector('#app').classList.contains('inspector-hidden'));
 assert.equal(await page.locator('#inspector').isVisible(), true);
@@ -553,6 +586,9 @@ await page.evaluate((sessionId) => window.relay.sendMessage({
   sessionId, text: 'relay-tool read the README', model: 'custom::test-model', variant: '', access: 'ask', files: [], skills: [],
 }), approvalSession);
 await waitFor(() => document.querySelector('#requests .request-card') !== null, 60_000);
+console.log('The task list shows a parked task as Waiting for you');
+await page.waitForFunction(() => [...document.querySelectorAll('#task-list .task-button .task-time')].some(node => (node.textContent ?? '').includes('Waiting for you')), undefined, { timeout: 20_000 });
+assert.ok(await page.locator('#task-list .task-button', { hasText: 'Waiting for you' }).count() >= 1, 'a task blocked on approval did not show Waiting in the sidebar');
 console.log('The composer steps aside while the agent waits on an approval');
 assert.equal(await page.locator('.composer-wrap').isVisible(), false, 'the typing field should hide while an approval is pending');
 assert.equal(await page.evaluate(() => document.querySelector('.chat').classList.contains('awaiting-input')), true);
@@ -591,6 +627,20 @@ await page.keyboard.press('Escape');
 await waitFor(() => !document.querySelector('#app').classList.contains('attention-open'));
 assert.equal(await page.locator('#attention').isVisible(), false);
 
+console.log("Asking the agent to drive Relay's own browser");
+await page.click('#new-task');
+await waitFor(() => document.querySelectorAll('#task-list .task-button').length >= 4, 20_000);
+const browserSession = (await page.evaluate(async () => window.relay.listSessions()))[0].id;
+await page.evaluate((sessionId) => window.relay.sendMessage({
+  sessionId, text: 'relay-browser open the preview page', model: 'custom::test-model', variant: '', access: 'full', files: [], skills: [],
+}), browserSession);
+await waitFor(() => [...document.querySelectorAll('article.assistant-message')].some((node) => /Browser check: SNAPSHOT_OK/.test(node.textContent ?? '')), 90_000);
+await waitFor(() => [...document.querySelectorAll('details.tool-stepper')].some((details) => details.dataset.state === 'completed'), 20_000);
+const browserWindows = await Promise.all(app.windows().map((window) => window.title().catch(() => '')));
+// The hidden BrowserWindow starts titled "Relay Agent Browser", but Electron adopts the page's <title> once loaded.
+assert.ok(browserWindows.includes('Relay Preview'), `the hidden agent browser window never opened: ${browserWindows.join(', ')}`);
+await page.screenshot({ path: join(artifacts, 'agent-browser.png') });
+
 console.log('Browsing, installing and removing curated skills on the Toolkit page');
 await waitFor(() => !document.querySelector('#tools-button')?.disabled, 20_000);
 await page.click('#tools-button');
@@ -600,6 +650,7 @@ assert.equal(await page.locator('#tools-button').getAttribute('aria-pressed'), '
 assert.equal(await page.locator('#tools-tab-skills').getAttribute('aria-selected'), 'true');
 assert.match(await text('#tools-summary'), /bundled with Relay/);
 assert.equal(await page.locator('.tools-grid .tools-card').count(), 100, 'the curated skill catalog did not list 100 skills');
+assert.equal(await page.evaluate(() => document.querySelectorAll('.tools-grid .tools-card .catalog-icon svg').length), 100, 'skill cards are missing category icons');
 assert.match(await text('.tools-section:first-of-type'), /No skills installed yet/);
 await page.screenshot({ path: join(artifacts, 'skills.png') });
 
@@ -707,6 +758,7 @@ assert.equal(await page.locator('#tools-tab-plugins').getAttribute('aria-selecte
 assert.equal(await page.locator('#tools-tab-skills').getAttribute('aria-selected'), 'false');
 assert.match(await text('#tools-summary'), /0 installed · 100 plugin packs bundled with Relay/);
 assert.equal(await page.locator('.tools-grid .tools-card').count(), 100, 'the curated plugin catalog did not list 100 packs');
+assert.equal(await page.evaluate(() => document.querySelectorAll('.tools-grid .tools-card .catalog-icon svg').length), 100, 'plugin cards are missing icons');
 assert.match(await text('.tools-section:first-of-type'), /No plugins installed yet/);
 await page.screenshot({ path: join(artifacts, 'plugins.png') });
 
@@ -817,10 +869,55 @@ console.log('Checking connectors on the same Toolkit page');
 await page.click('#tools-button');
 await waitFor(() => document.querySelector('#tools-page')?.hidden === false, 20_000);
 await page.click('#tools-tab-connectors');
-await waitFor(() => /Connectors ·/.test(document.querySelector('#tools-body')?.textContent ?? '') && !/Loading connectors/.test(document.querySelector('#tools-body')?.textContent ?? ''), 30_000);
-assert.equal(await page.locator('#tools-chips .extension-chip').count(), 4);
+await waitFor(() => /Popular connectors · 100/.test(document.querySelector('#tools-body')?.textContent ?? ''), 30_000);
+assert.equal(await page.locator('#tools-chips .extension-chip').count(), 13, 'the connectors tab did not show state and category chips');
+assert.equal(await page.locator('.tools-grid .tools-card').count(), 100, 'the popular connector catalog did not list 100 connectors');
+assert.equal(await page.evaluate(() => document.querySelectorAll('.tools-grid .tools-card .catalog-icon svg').length), 100, 'connector cards are missing icons');
+await page.screenshot({ path: join(artifacts, 'connectors.png') });
+
+console.log('Adding the Filesystem connector for real, from catalog prefill to engine connection');
+await page.locator('.tools-grid .tools-card', { hasText: 'Filesystem' }).locator('button', { hasText: 'Add' }).click();
+await waitFor(() => document.querySelector('dialog[aria-label="Add Filesystem"]') !== null, 20_000);
+assert.match(await page.locator('dialog[aria-label="Add Filesystem"] textarea').inputValue(), /server-filesystem/, 'the catalog add form did not prefill the command');
+await page.locator('dialog[aria-label="Add Filesystem"] button[type="submit"]').click();
+await waitFor(() => document.querySelector('dialog[aria-label="Add Filesystem"]') === null, 90_000);
+await waitFor(() => /Filesystem/.test(document.querySelector('.tools-installed')?.textContent ?? ''), 30_000);
+
+console.log('Waiting for the engine to connect the new connector');
+await waitFor(() => {
+  const row = [...document.querySelectorAll('.tools-installed .integration-row')].find(node => node.textContent.includes('Filesystem'));
+  return row?.textContent.includes('Connected') ?? false;
+}, 150_000);
+
+console.log('A broken connector reports its failure with the engine error and a working Retry');
+await page.click('#tools-secondary');
+await waitFor(() => document.querySelector('dialog[aria-label="Add connector"]') !== null, 20_000);
+const brokenDialog = page.locator('dialog[aria-label="Add connector"]');
+await brokenDialog.locator('input').first().fill('Broken');
+await brokenDialog.locator('textarea').fill('["definitely-not-a-real-binary-9x7"]');
+await brokenDialog.locator('button[type="submit"]').click();
+await waitFor(() => document.querySelector('dialog[aria-label="Add connector"]') === null, 90_000);
+await waitFor(() => {
+  const row = [...document.querySelectorAll('.tools-installed .integration-row')].find(node => node.textContent.includes('Broken'));
+  return row?.textContent.includes('Failed') ?? false;
+}, 150_000);
+const brokenRow = page.locator('.tools-installed .integration-row', { hasText: 'Broken' });
+assert.match(await brokenRow.textContent(), /definitely-not-a-real-binary-9x7/, 'the broken connector did not show its command');
+assert.ok((await brokenRow.locator('.connector-error').textContent())?.trim().length, 'the failed connector did not surface the engine error');
+await brokenRow.locator('button', { hasText: 'Retry' }).click();
+await waitFor(() => {
+  const row = [...document.querySelectorAll('.tools-installed .integration-row')].find(node => node.textContent.includes('Broken'));
+  return row?.textContent.includes('Failed') ?? false;
+}, 90_000);
+await page.screenshot({ path: join(artifacts, 'connector-status.png') });
+
+console.log('Filtering the connector catalog by category and clearing the search');
+await page.locator('#tools-chips .extension-chip:text-is("Search & research")').click();
+await waitFor(() => /Popular connectors · 17/.test(document.querySelector('#tools-body')?.textContent ?? ''), 20_000);
+await page.locator('#tools-chips .extension-chip:text-is("All")').click();
+await waitFor(() => /Popular connectors · 100/.test(document.querySelector('#tools-body')?.textContent ?? ''), 20_000);
 await page.fill('#tools-search', 'no-such-connector');
-await waitFor(() => /No connectors match that search|No connectors configured yet/.test(document.querySelector('#tools-body')?.textContent ?? ''));
+await waitFor(() => /No popular connectors match that search/.test(document.querySelector('#tools-body')?.textContent ?? ''));
 await page.fill('#tools-search', '');
 await page.click('#tools-close');
 await waitFor(() => document.querySelector('#tools-page')?.hidden === true);
@@ -831,6 +928,36 @@ await waitFor(() => {
   return !document.querySelector('#command-menu')?.hidden && /\/init/.test(menu) && !/\/check/.test(menu) && !/\/document/.test(menu);
 }, 30_000);
 await page.keyboard.press('Escape');
+
+console.log('Mentioning a file, a skill and a connector from the composer with @');
+await page.fill('#prompt', 'Summarize @read');
+await waitFor(() => !document.querySelector('#mention-menu')?.hidden && /Files/.test(document.querySelector('#mention-menu')?.textContent ?? ''), 30_000);
+const firstMentionClass = await page.locator('#mention-menu .command-option').first().getAttribute('class');
+assert.ok(firstMentionClass?.includes('active'), 'the first mention is not highlighted for keyboard picking');
+await page.locator('#mention-menu .command-option', { hasText: 'README.md' }).first().click();
+await waitFor(() => document.querySelectorAll('#attachments .attachment').length > 0, 20_000);
+
+await page.fill('#prompt', 'Check @Open');
+await waitFor(() => !document.querySelector('#mention-menu')?.hidden && /Skills/.test(document.querySelector('#mention-menu')?.textContent ?? ''), 30_000);
+await page.locator('#mention-menu .command-option', { hasText: 'OpenCode' }).first().click();
+await waitFor(() => document.querySelectorAll('#skill-chips .attachment').length > 0, 20_000);
+
+await page.fill('#prompt', 'Look at @File');
+await waitFor(() => !document.querySelector('#mention-menu')?.hidden && /Connectors/.test(document.querySelector('#mention-menu')?.textContent ?? ''), 30_000);
+await page.locator('#mention-menu .command-option', { hasText: 'Filesystem' }).first().click();
+await waitFor(() => /Connector: Filesystem/.test(document.querySelector('#context-chips')?.textContent ?? ''), 20_000);
+await page.screenshot({ path: join(artifacts, 'mentions.png') });
+
+while (await page.locator('#attachments button[aria-label^="Remove attachment"]').count()) {
+  await page.locator('#attachments button[aria-label^="Remove attachment"]').first().click();
+}
+while (await page.locator('#skill-chips button[aria-label^="Remove skill"]').count()) {
+  await page.locator('#skill-chips button[aria-label^="Remove skill"]').first().click();
+}
+while (await page.locator('#context-chips button[aria-label^="Remove context"]').count()) {
+  await page.locator('#context-chips button[aria-label^="Remove context"]').first().click();
+}
+await page.fill('#prompt', '');
 
 console.log('Opening project files and editing through the inspector');
 await page.click('#tab-files');
@@ -884,6 +1011,8 @@ await waitFor(() => !/README\.md/.test(document.querySelector('#change-list')?.t
 assert.doesNotMatch(await readFile(join(project, 'README.md'), 'utf8'), /Edited in Relay\./);
 
 console.log('Streaming a real workspace terminal');
+await page.click('#overflow-button');
+await waitFor(() => document.querySelector('#title-overflow')?.hidden === false);
 await page.click('#terminal-button');
 await waitFor(() => document.querySelector('#terminal-status')?.textContent === 'Local shell', 30_000);
 await page.locator('#terminal-host .xterm-helper-textarea').click();
@@ -940,6 +1069,38 @@ await page.locator('dialog[aria-label="Undo changes?"] button', { hasText: 'Undo
 await waitFor(() => /Removed notes\.md\./.test(document.querySelector('#notice-text')?.textContent ?? ''), 20_000);
 await assert.rejects(readFile(join(project, 'notes.md'), 'utf8'));
 
+console.log("Previewing the agent's file changes inline in the review card");
+const tasksBeforeEdit = await page.evaluate(() => document.querySelectorAll('#task-list .task-button').length);
+await page.click('#new-task');
+await page.waitForFunction((count) => document.querySelectorAll('#task-list .task-button').length === count, tasksBeforeEdit + 1, { timeout: 20_000 });
+await waitFor(() => !document.querySelector('#prompt')?.disabled, 20_000);
+await page.selectOption('#access-select', 'full');
+await page.fill('#prompt', 'relay-edit the readme');
+await page.keyboard.press('Enter');
+await waitFor(() => document.querySelector('#review-card')?.hidden === false, 60_000).catch(async () => {
+  const dump = await page.evaluate(async () => ({
+    requests: document.querySelector('#requests')?.textContent ?? '',
+    notice: document.querySelector('#notice-text')?.textContent ?? '',
+    conversation: (document.querySelector('#conversation')?.textContent ?? '').slice(-400),
+    reviewHidden: document.querySelector('#review-card')?.hidden,
+    reviewText: (document.querySelector('#review-card')?.textContent ?? '').slice(0, 200),
+    active: document.querySelector('#task-list .task-button.active .task-name')?.textContent ?? '',
+    promptValue: document.querySelector('#prompt')?.value ?? '',
+  }));
+  console.log('REVIEW CARD TIMEOUT DUMP', JSON.stringify(dump, null, 1));
+  console.log('README on disk:', await readFile(join(project, 'README.md'), 'utf8').catch(String));
+  throw new Error('review card never appeared');
+});
+assert.match(await text('#review-card .review-title'), /Edited 1 file/);
+assert.match(await text('#review-card .review-row'), /README\.md/);
+await page.locator('#review-card .review-row').first().click();
+await waitFor(() => document.querySelectorAll('#review-card .review-diff .patch-line.added').length > 0, 10_000);
+assert.ok(await page.locator('#review-card .review-diff .patch-line.removed').count() > 0, 'the inline preview showed no removed lines');
+assert.match(await text('#review-card .review-diff'), /Edited by the agent for the review card/);
+await page.screenshot({ path: join(artifacts, 'review-preview.png') });
+await page.locator('#review-card .review-row').first().click();
+await waitFor(() => document.querySelectorAll('#review-card .review-diff').length === 0, 10_000);
+
 console.log('Opening a live page in the embedded browser');
 await page.click('#palette-button');
 await waitFor(() => document.querySelector('dialog[aria-label="Search tasks and commands"]') !== null);
@@ -991,10 +1152,11 @@ await page.screenshot({ path: join(artifacts, 'dictation.png') });
 await page.fill('#prompt', '');
 
 console.log('Restarting to verify task persistence');
+const tasksBeforeRestart = await page.evaluate(() => document.querySelectorAll('#task-list .task-button').length);
 await app.close();
 await launch();
 await waitFor(() => document.querySelector('#engine-status')?.textContent?.startsWith('Engine ready'));
-await waitFor(() => document.querySelectorAll('#task-list .task-button').length === 3, 20_000);
+await page.waitForFunction((count) => document.querySelectorAll('#task-list .task-button').length === count, tasksBeforeRestart, { timeout: 20_000 });
 assert.match(await text('#task-list'), /New task/);
 const persistedTask = page.locator(`#task-list .task-button[data-session="${likedSession}"]`);
 await persistedTask.waitFor({ timeout: 20_000 });
@@ -1024,8 +1186,9 @@ const groupNames = await page.evaluate(() => [...document.querySelectorAll('#tas
 assert.deepEqual(groupNames, [basename(project), basename(pastProject)]);
 const projectGroup = page.locator('#task-list .task-group').nth(0);
 const pastGroup = page.locator('#task-list .task-group').nth(1);
-assert.equal(await projectGroup.locator('.task-button').count(), 3);
 assert.equal(await pastGroup.locator('.task-button').count(), 1);
+const projectTasks = (await page.evaluate(() => document.querySelectorAll('#task-list .task-group .task-button').length)) - 1;
+assert.equal(await projectGroup.locator('.task-button').count(), projectTasks);
 assert.match(await pastGroup.locator('.task-button .task-name').textContent(), /New task/);
 await pastGroup.locator('.task-group-toggle').click();
 await waitFor(() => document.querySelectorAll('#task-list .task-group')[1]?.querySelector('.task-group-body')?.classList.contains('collapsed') === true);
@@ -1043,6 +1206,30 @@ await waitFor(() => document.querySelectorAll('#task-list .task-group').length =
 assert.equal(await page.locator('#task-list .task-group-name').first().textContent(), basename(pastProject));
 assert.match(await text('#task-list .task-group.current .task-button.active .task-name'), /New task/);
 await app.close();
+
+console.log('Quitting with a running engine and checking nothing is left behind');
+await launch();
+await waitFor(() => document.querySelector('#engine-status')?.textContent?.startsWith('Engine ready'), 90_000);
+const quitStart = Date.now();
+let settledMs;
+const closed = app.close().then(() => { settledMs = Date.now() - quitStart; }, (error) => {
+  console.log(`app.close() reported: ${error?.message ?? error}`);
+  settledMs = -1;
+});
+while (settledMs === undefined && Date.now() - quitStart < 10_000) {
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+await closed.catch(() => {});
+assert.ok(settledMs !== undefined && settledMs >= 0 && settledMs < 10_000, `quitting took ${settledMs === undefined ? 'more than 10' : settledMs} ms — the engine outlived the app`);
+console.log(`App quit in ${settledMs} ms`);
+await new Promise((resolve) => setTimeout(resolve, 1_000));
+let leftover = '';
+try {
+  leftover = execFileSync('pgrep', ['-f', 'node_modules/@opencode/cli/bin/opencode.exe'], { encoding: 'utf8' }).trim();
+} catch {
+  leftover = ''; // pgrep exits 1 when nothing matches
+}
+assert.equal(leftover, '', `the engine is still running after the app quit: ${leftover}`);
 
 console.log('Verifying unreadable credentials surface as an engine error');
 const storedSettings = JSON.parse(await readFile(join(settingsDir, 'settings.json'), 'utf8'));

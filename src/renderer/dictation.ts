@@ -1,4 +1,5 @@
 import { notify, report } from './dom';
+import { cleanVoiceText } from './state';
 
 const maximumBytes = 25 * 1024 * 1024;
 const maximumSeconds = 120;
@@ -123,7 +124,7 @@ export class Dictation {
   }
 
   private insert(value: string): void {
-    const text = value.trim();
+    const text = cleanVoiceText(value);
     if (!text) { notify('The transcription service returned no text.', true); return; }
     const start = this.input.selectionStart ?? this.input.value.length;
     const end = this.input.selectionEnd ?? start;

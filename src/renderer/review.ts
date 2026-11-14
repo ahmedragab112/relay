@@ -1,4 +1,5 @@
 import type { FileChange } from '../shared/contracts';
+import { parsePatch } from './state';
 import { byId, el, report } from './dom';
 
 const PREVIEW = 3;
@@ -11,6 +12,7 @@ export class ReviewCard {
   private signature = '';
   private changes: FileChange[] = [];
   private expanded = false;
+  private openPaths = new Set<string>();
 
   constructor(private review: () => void, private onChanges: () => void = () => {}) {
   }
@@ -22,6 +24,7 @@ export class ReviewCard {
     this.request++;
     this.signature = '';
     this.expanded = false;
+    this.openPaths.clear();
     this.render([]);
     if (id) void this.reload();
   }
@@ -57,6 +60,17 @@ export class ReviewCard {
     if (signature === this.signature) return;
     this.signature = signature;
     this.onChanges();
+    this.paint();
+    const paths = changes.slice(0, 8).map(change => change.path);
+    this.control.title = paths.join('\n') + (changes.length > paths.length ? `\n…${changes.length - paths.length} more` : '');
+  }
+
+  // Expanding a file's preview only re-paints, so toggling never trips the change signature.
+  private paint(): void {
+    const changes = this.changes;
+    let additions = 0;
+    let deletions = 0;
+    for (const change of changes) { additions += change.additions; deletions += change.deletions; }
 
     const counts = el('span', 'review-counts');
     counts.append(el('span', 'added', `+${additions}`), document.createTextNode(' '), el('span', 'removed', `−${deletions}`));
@@ -74,12 +88,22 @@ export class ReviewCard {
     const list = el('div', 'review-list');
     const shown = this.expanded ? changes : changes.slice(0, PREVIEW);
     for (const change of shown) {
-      const row = el('div', 'review-row');
-      row.append(el('span', 'review-path truncate', change.path));
+      const open = this.openPaths.has(change.path);
+      const row = el('button', 'review-row');
+      row.type = 'button';
+      row.setAttribute('aria-expanded', String(open));
+      row.title = open ? 'Hide the changes in this file' : 'Preview the changes in this file';
+      row.append(el('span', `review-chevron${open ? ' open' : ''}`, '›'), el('span', 'review-path truncate', change.path));
       const c = el('span', 'review-row-counts');
       c.append(el('span', 'added', `+${change.additions}`), document.createTextNode(' '), el('span', 'removed', `−${change.deletions}`));
       row.append(c);
+      row.addEventListener('click', () => {
+        if (this.openPaths.has(change.path)) this.openPaths.delete(change.path);
+        else this.openPaths.add(change.path);
+        this.paint();
+      });
       list.append(row);
+      if (open) list.append(this.diffPreview(change));
     }
     const rest = changes.length - shown.length;
     if (rest > 0) {
@@ -90,8 +114,23 @@ export class ReviewCard {
     }
 
     this.control.replaceChildren(head, list);
-    const paths = changes.slice(0, 8).map(change => change.path);
-    this.control.title = paths.join('\n') + (changes.length > paths.length ? `\n…${changes.length - paths.length} more` : '');
+  }
+
+  // Qoder/opencode-style preview: the unified patch inline, no editor round-trip. The full
+  // Monaco diff stays one click away in Review.
+  private diffPreview(change: FileChange): HTMLElement {
+    const wrap = el('div', 'review-diff');
+    if (!change.patch) {
+      wrap.append(el('p', 'review-diff-empty', 'Diff preview unavailable — open Review for the full editor.'));
+      return wrap;
+    }
+    const body = el('div', 'review-diff-body');
+    for (const line of parsePatch(change.patch)) {
+      if (line.kind === 'meta') continue;
+      body.append(el('div', `patch-line ${line.kind}`, line.text));
+    }
+    wrap.append(body);
+    return wrap;
   }
 
   private actionButton(label: string, onClick: () => void, className = ''): HTMLButtonElement {
@@ -107,6 +146,7 @@ export class ReviewCard {
       try { await window.relay.undoChange(path); } catch (error) { report(`Could not undo ${path}`, error); }
     }
     this.signature = '';
+    this.openPaths.clear();
     await this.reload();
   }
 }

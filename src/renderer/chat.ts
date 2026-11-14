@@ -348,7 +348,12 @@ export class ChatView {
     root.classList.toggle('system-message', role === 'system');
     root.classList.toggle('assistant-message', role === 'assistant');
     root.classList.toggle('user-message', role === 'user');
-    if (role === 'system') { this.renderCompaction(root, group.messages[0], open); return; }
+    if (role === 'system') {
+      const message = group.messages[0];
+      if (message?.parts.some(part => part.type === 'auto-switch')) this.renderModelSwitch(root, message);
+      else this.renderCompaction(root, message, open);
+      return;
+    }
     const meta = el('div', 'message-meta');
     meta.append(el('span', `avatar ${role === 'assistant' ? 'agent' : ''}`, role === 'user' ? 'Y' : 'R'), el('span', '', role === 'user' ? 'You' : 'Relay'));
     const modelMessage = role === 'assistant' ? group.messages.find(message => message.model) : undefined;
@@ -656,6 +661,17 @@ export class ChatView {
     }
     if (part.error) card.append(el('p', 'inline-error', part.error));
     root.replaceChildren(card);
+  }
+
+  private renderModelSwitch(root: HTMLElement, message: ChatMessage): void {
+    const part = message.parts.find(item => item.type === 'auto-switch');
+    const model = part && part.type === 'auto-switch' ? part.model : undefined;
+    const divider = el('div', 'model-switch-divider');
+    divider.append(el('span', 'divider-line'), el('span', 'divider-label', model ? `Switched to ${model}` : 'Switched model'), el('span', 'divider-line'));
+    const note = el('span', 'divider-note', 'Model hit a limit — continuing with the next available model');
+    const wrap = el('div', 'model-switch');
+    wrap.append(divider, note);
+    root.replaceChildren(wrap);
   }
 
   private scrollToBottom(): void {

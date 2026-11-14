@@ -21,6 +21,16 @@ export class RequestView {
   private focusStolen = false;
 
   select(id: string): void { this.sessionId = id; this.autoSkip(); this.render(); }
+
+  // The task list marks any task whose agent is parked on an approval or an answer, so a
+  // blocked run is diagnosable from another chat instead of silently looking stalled.
+  pendingFor(sessionId: string): number {
+    let count = 0;
+    for (const request of this.permissions.values()) if (request.sessionId === sessionId) count++;
+    for (const request of this.questions.values()) if (request.sessionId === sessionId) count++;
+    return count;
+  }
+
   clear(): void {
     this.generation++;
     this.permissions.clear(); this.questions.clear(); this.cards.clear(); this.root.replaceChildren();

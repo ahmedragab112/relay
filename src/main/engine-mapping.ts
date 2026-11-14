@@ -26,6 +26,11 @@ export function mapMessages(messages: SessionMessageInfo[]): ChatMessage[] {
       }] }];
     }
     if (message.type === 'user') {
+      const autoResume = (message.metadata as { relay?: { autoResume?: unknown; model?: unknown } } | undefined)?.relay;
+      if (autoResume && (autoResume as { autoResume?: unknown }).autoResume) {
+        const model = typeof (autoResume as { model?: unknown }).model === 'string' ? (autoResume as { model: string }).model : undefined;
+        return [{ id: message.id, role: 'system', createdAt: message.time.created, parts: [{ id: message.id, type: 'auto-switch' as const, ...(model ? { model } : {}) }] }];
+      }
       return [{ id: message.id, role: 'user', createdAt: message.time.created, parts: [
         { id: `${message.id}-text`, type: 'text', text: message.text },
         ...(message.files ?? []).map((file, index) => ({ id: `${message.id}-file-${index}`, type: 'file' as const, name: file.name || file.source.type })),

@@ -4,6 +4,11 @@ import type {
 } from '../shared/contracts.js';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(channel, ...args);
+const on = <T extends unknown[]>(channel: string, listener: (...args: T) => void): (() => void) => {
+  const handler = (_event: Electron.IpcRendererEvent, ...args: unknown[]): void => listener(...args as T);
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+};
 
 const api: RelayAPI = {
   getState: () => invoke('app:state'),
@@ -26,11 +31,10 @@ const api: RelayAPI = {
   copyText: (value: string) => invoke('clipboard:write', value),
   sendMessage: (input: SendMessageInput) => invoke('sessions:send', input),
   setSessionAccess: (sessionId: string, access: AccessLevel) => invoke('sessions:access', sessionId, access),
-  listQueuedMessages: (sessionId: string) => invoke('sessions:inbox', sessionId),
-  removeQueuedMessage: (sessionId: string, id: string) => invoke('sessions:inbox-remove', sessionId, id),
+  listQueuedMessages: (sessionId: string) => invoke('sessions:inbox', sessionId),  removeQueuedMessage: (sessionId: string, id: string) => invoke('sessions:inbox-remove', sessionId, id),
   steerQueuedMessage: (sessionId: string, id: string) => invoke('sessions:inbox-steer', sessionId, id),
   abortSession: (sessionId: string) => invoke('sessions:abort', sessionId),
-  backgroundSession: (sessionId: string) => invoke('sessions:background', sessionId),
+
   listPermissions: () => invoke('permissions:list'),
   replyPermission: (id: string, decision: PermissionDecision) => invoke('permissions:reply', id, decision),
   listQuestions: () => invoke('questions:list'),
@@ -69,6 +73,9 @@ const api: RelayAPI = {
   saveProvider: (input: ProviderInput) => invoke('providers:save', input),
   removeProvider: (id: ProviderInput['id']) => invoke('providers:remove', id),
   listMcp: () => invoke('mcp:list'),
+  listConnectorCatalog: () => invoke('connectors:catalog'),
+  connectorStatus: () => invoke('connectors:status'),
+  connectConnector: (name: string) => invoke('connectors:connect', name),
   saveMcp: (server: McpServer) => invoke('mcp:save', server),
   removeMcp: (name: string) => invoke('mcp:remove', name),
   createTerminal: (cols: number, rows: number) => invoke('terminal:create', cols, rows),
@@ -85,6 +92,8 @@ const api: RelayAPI = {
   minimizeWindow: () => invoke('window:minimize'),
   zoomWindow: () => invoke('window:zoom'),
   closeWindow: () => invoke('window:close'),
+  confirmClose: () => invoke('app:confirm-close'),
+  onRequestClose: (listener) => on('app:request-close', listener),
   onEvent: (listener: (event: AppEvent) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, value: AppEvent) => listener(value);
     ipcRenderer.on('app:event', handler);
