@@ -6,13 +6,14 @@ export interface PlusAction {
   run: () => void | Promise<void>;
 }
 
-export function wirePlusMenu(anchor: HTMLButtonElement, menu: HTMLElement, actions: () => PlusAction[]): void {
+export function wirePlusMenu(anchor: HTMLButtonElement, menu: HTMLElement, actions: () => PlusAction[], canOpen: () => boolean = () => true): void {
   const close = (refocus = false) => {
     menu.hidden = true;
     anchor.setAttribute('aria-expanded', 'false');
     if (refocus) anchor.focus();
   };
   const open = () => {
+    if (!canOpen()) return;
     menu.replaceChildren(...actions().map(action => {
       const item = button('', action.run, 'plus-option');
       item.setAttribute('role', 'menuitem');

@@ -1,6 +1,21 @@
-import type { SearchMode } from '../shared/contracts';
+import type { HistoryHit, SearchMode } from '../shared/contracts';
 import { el, errorText } from './dom';
 import { dialog } from './dialog';
+
+function wireNavigation(input: HTMLInputElement, results: HTMLElement): void {
+  input.addEventListener('keydown', event => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); results.querySelector('button')?.focus(); }
+    if (event.key === 'Enter') { event.preventDefault(); results.querySelector('button')?.click(); }
+  });
+  results.addEventListener('keydown', event => {
+    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
+    event.preventDefault();
+    const controls = Array.from(results.querySelectorAll('button'));
+    const index = controls.indexOf(document.activeElement as HTMLButtonElement);
+    if (event.key === 'ArrowUp' && index === 0) input.focus();
+    else controls[(index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length]?.focus();
+  });
+}
 
 export function showSearch(mode: SearchMode, open: (path: string, line?: number) => void): void {
   const modal = dialog(mode === 'files' ? 'Go to file' : 'Search in files');
@@ -45,18 +60,56 @@ export function showSearch(mode: SearchMode, open: (path: string, line?: number)
     window.clearTimeout(timer);
     timer = window.setTimeout(() => void run(), 160);
   });
-  input.addEventListener('keydown', event => {
-    if (event.key === 'ArrowDown') { event.preventDefault(); results.querySelector('button')?.focus(); }
-    if (event.key === 'Enter') { event.preventDefault(); results.querySelector('button')?.click(); }
+  wireNavigation(input, results);
+  modal.add(input, status, results);
+  void run();
+  input.focus();
+}
+
+export function showTaskSearch(open: (hit: HistoryHit) => void): void {
+  const modal = dialog('Search tasks');
+  const input = el('input', 'palette-input');
+  input.type = 'search';
+  input.autocomplete = 'off';
+  input.placeholder = 'Search every task and message…';
+  input.setAttribute('aria-label', input.placeholder);
+  const status = el('p', 'small muted');
+  const results = el('div', 'palette-results search-results');
+  let request = 0;
+  let timer: number | undefined;
+  const run = async () => {
+    const query = input.value.trim();
+    const current = ++request;
+    if (!query) {
+      results.replaceChildren();
+      status.textContent = 'Type to search task titles and conversation text across every project.';
+      return;
+    }
+    status.textContent = 'Searching…';
+    try {
+      const found = await window.relay.searchHistory(query);
+      if (current !== request) return;
+      status.textContent = found.length ? `${found.length}${found.length >= 30 ? '+' : ''} result${found.length === 1 ? '' : 's'}` : 'No matches';
+      results.replaceChildren(...found.map(hit => {
+        const item = el('button', 'palette-option search-result');
+        item.type = 'button';
+        const copy = el('span', 'search-copy');
+        copy.append(el('span', 'search-path', hit.title));
+        if (hit.messageId) copy.append(el('span', 'search-line', hit.snippet));
+        item.append(copy);
+        item.append(el('span', 'pill', hit.role === 'user' ? 'You' : hit.role === 'assistant' ? 'Relay' : 'Task'));
+        item.addEventListener('click', () => { modal.root.close(); open(hit); });
+        return item;
+      }));
+    } catch (error) {
+      if (current === request) { results.replaceChildren(); status.textContent = `Search failed: ${errorText(error)}`; }
+    }
+  };
+  input.addEventListener('input', () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => void run(), 160);
   });
-  results.addEventListener('keydown', event => {
-    if (!['ArrowDown', 'ArrowUp'].includes(event.key)) return;
-    event.preventDefault();
-    const controls = Array.from(results.querySelectorAll('button'));
-    const index = controls.indexOf(document.activeElement as HTMLButtonElement);
-    if (event.key === 'ArrowUp' && index === 0) input.focus();
-    else controls[(index + (event.key === 'ArrowDown' ? 1 : -1) + controls.length) % controls.length]?.focus();
-  });
+  wireNavigation(input, results);
   modal.add(input, status, results);
   void run();
   input.focus();

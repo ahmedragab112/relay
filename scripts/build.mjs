@@ -1,6 +1,6 @@
 import { build as viteBuild } from 'vite';
 import { build as bundle } from 'esbuild';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, chmod } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { stageEngine } from './engine.mjs';
 
@@ -22,6 +22,36 @@ console.log('Building main process');
 await bundle({ ...shared, entryPoints: [join(root, 'src/main/index.ts')], outfile: join(root, 'dist/main/index.cjs') });
 console.log('Building preload bridge');
 await bundle({ ...shared, entryPoints: [join(root, 'src/preload/index.ts')], outfile: join(root, 'dist/preload/index.cjs') });
+
+console.log('Building relayctl');
+const relayctl = join(root, 'dist', 'relayctl.mjs');
+await bundle({
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  logLevel: 'warning',
+  sourcemap: false,
+  entryPoints: [join(root, 'src/cli/index.ts')],
+  outfile: relayctl,
+  banner: { js: '#!/usr/bin/env node' },
+});
+await chmod(relayctl, 0o755);
+
+console.log('Building relay launcher');
+const relay = join(root, 'dist', 'relay.mjs');
+await bundle({
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  logLevel: 'warning',
+  sourcemap: false,
+  entryPoints: [join(root, 'src/cli/relay.ts')],
+  outfile: relay,
+  banner: { js: '#!/usr/bin/env node' },
+});
+await chmod(relay, 0o755);
 
 const { target } = await stageEngine({ root, platform, arch, version });
 console.log(`Relay build complete for ${target.platform}-${target.arch}`);

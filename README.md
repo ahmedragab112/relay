@@ -16,6 +16,8 @@ Everything is local-first: your workspace, settings, and provider keys stay on t
 - **Agent control bridge** — Relay runs a localhost-only, token-protected control server and ships a CLI (`relayctl.mjs`) so agents with shell access can drive the app: `health`, `tasks`, `create-task`, `open-page`, `skills`, `install-skill`, `automations`, `create-automation`, `run-automation`. A `relay-control` skill is auto-installed so agents discover it.
 - **Access level** — Read only / Ask / Auto-edit / Full access; changes apply to the running task immediately (mid-turn enforcement included).
 - **Editing** — full Monaco diff review, undo/revert per file, inline "Edited N files" card with Undo/Review and a "show more" expander.
+- **Search across everything** — `⌘⇧F` (or the palette's **Search tasks & messages…**) searches every task and message in every project, then opens the task and flashes the matched reply.
+- **Updates** — installed builds check the GitHub release feed after launch, download in the background, and install on restart. Settings → General → Updates has **Check now**, progress, and the automatic-check toggle.
 
 ## Requirements
 
@@ -45,7 +47,7 @@ npm run package:linux  # AppImage + deb, x64 & arm64
 npm run package:win    # NSIS + portable, x64
 ```
 
-The app is currently **ad-hoc signed, not notarized** — first launch on another Mac needs right-click → Open, or you can sign/notarize with your own Developer ID.
+macOS builds are **signed with your Developer ID** (hardened runtime, JIT entitlements) and the notarization hook runs automatically when `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are set; without them the build stays signed but not notarized. Installed builds get updates from the GitHub feed configured under `build.publish` once a release with the matching artifacts exists.
 
 ## Architecture
 
@@ -57,18 +59,49 @@ The app is currently **ad-hoc signed, not notarized** — first launch on anothe
 
 ## Relay control CLI
 
+`relayctl` drives the running app from any shell. Put it on your PATH once:
+
 ```bash
+node ~/Library/Application\ Support/relay-workspace/relayctl.mjs install
+```
+
+Then:
+
+```bash
+relayctl --help
 relayctl health
 relayctl tasks
 relayctl skills
 relayctl automations
-relayctl create-task '{"title":"Triage the flaky suite"}'
-relayctl open-page '{"url":"https://example.com"}'
-relayctl install-skill '{"url":"https://github.com/org/repo/tree/main/skills/foo"}'
+relayctl create-task --title "Triage the flaky suite" --prompt "Fix the flaky test"
+relayctl open-page --url https://example.com
+relayctl install-skill --url https://github.com/org/repo/tree/main/skills/foo
 relayctl create-automation '{"name":"Daily triage","action":{"kind":"prompt","prompt":"Summarize failures","location":"local","output":"independent","access":"ask","model":"provider::model"},"schedule":{"kind":"daily","time":"09:00"},"timezone":"UTC","enabled":true}'
+relayctl run-automation --id <automation id>
 ```
 
-The CLI and a per-boot token live next to the app's state (`~/Library/Application Support/relay-workspace/`). The server only binds to `127.0.0.1`.
+`--json` prints the raw response instead of the formatted output, and JSON objects still work as positional arguments (`relayctl run-automation '{"id":"…"}'`). The CLI and a per-boot token live next to the app's state (`~/Library/Application Support/relay-workspace/`), and the app refreshes that copy from its bundled build on every launch. The server only binds to `127.0.0.1`.
+
+## Terminal agent
+
+`relay` runs the bundled OpenCode TUI against Relay's own engine, so it uses the same providers, skills, and session history as the app. Install it once:
+
+```bash
+node ~/Library/Application\ Support/relay-workspace/relay.mjs install
+```
+
+Then:
+
+```bash
+relay                         # start in the current folder
+relay ~/src/project           # start in a folder
+relay run "Fix the flaky test"
+relay models
+relay --help
+```
+
+Quit Relay.app first: the app and the terminal share sessions. `--force` overrides that check, and `--auto` / `--no-auto` override the default from Relay's access setting. Installing the launcher opts Relay into keeping its generated engine config (mode 0600) on disk so `relay` can start while the app is closed; without that opt-in the config is deleted on quit.
+
 
 ## Notes
 

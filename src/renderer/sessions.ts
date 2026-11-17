@@ -1,4 +1,5 @@
 import type { SessionSummary, Workspace } from '../shared/contracts';
+import { SCRATCH_WORKSPACE_ID } from '../shared/contracts';
 import { byId, button, el, errorText } from './dom';
 import { askText, confirmAction, dialog } from './dialog';
 import { fileIconElement } from './file-icons';
@@ -117,20 +118,27 @@ export class Sessions {
     const session = this.items.find(item => item.id === id);
     if (!session) return;
     const group = this.groups.find(item => item.sessions.some(candidate => candidate.id === id));
-    if (group && !group.current && group.path) {
+    if (group && !group.current) {
       this.queued = id;
-      void this.openFolder(group.id).then(opened => { if (!opened) this.queued = ''; });
+      const target = group.path ? group.id : SCRATCH_WORKSPACE_ID;
+      void this.openFolder(target).then(opened => { if (!opened) this.queued = ''; });
       return;
     }
     this.select(id);
   }
 
-  async create(): Promise<void> {
+  /** Reloads and selects the given task once it shows up (used after moving it). */
+  async resume(id: string): Promise<void> {
+    this.queued = id;
+    await this.reload();
+  }
+
+  async create(workspaceId?: string): Promise<void> {
     if (!this.workspace || this.creating) return;
     this.creating = true;
     const generation = this.generation;
     try {
-      const session = await window.relay.createSession();
+      const session = await window.relay.createSession(undefined, workspaceId);
       if (generation !== this.generation || this.disposed) return;
       this.items = [session, ...this.items.filter(item => item.id !== session.id)];
       this.regroup();

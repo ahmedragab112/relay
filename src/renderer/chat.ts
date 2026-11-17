@@ -145,6 +145,9 @@ export class ChatView {
     this.scrollButton.addEventListener('click', () => this.scrollToBottom());
   }
 
+  /** Messages currently on screen for the selected task. */
+  count(): number { return this.lastMessages.length; }
+
   select(sessionId: string): void {
     if (this.sessionId === sessionId) return;
     this.closeMenu();
@@ -241,6 +244,20 @@ export class ChatView {
       }
       report('Could not load conversation. Retry or refresh tasks', error);
     }
+  }
+
+  /** Center the reply that holds a searched message and flash it. Returns false until it is rendered. */
+  locate(messageId: string): boolean {
+    const group = groupMessages(this.lastMessages).find(candidate => candidate.messages.some(message => message.id === messageId));
+    const article = group ? this.articles.get(group.id) : undefined;
+    if (!article) return false;
+    const top = article.root.getBoundingClientRect().top - this.root.getBoundingClientRect().top + this.root.scrollTop - (this.root.clientHeight - article.root.offsetHeight) / 2;
+    this.root.scrollTo({ top: Math.max(0, top), behavior: 'smooth' });
+    article.root.classList.remove('flash');
+    void article.root.offsetWidth;
+    article.root.classList.add('flash');
+    window.setTimeout(() => article.root.classList.remove('flash'), 4_000);
+    return true;
   }
 
   private update(messages: ChatMessage[]): void {

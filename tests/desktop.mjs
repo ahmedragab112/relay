@@ -716,6 +716,19 @@ await page.keyboard.press('Escape');
 await waitFor(() => document.querySelector('#tools-page')?.hidden === true);
 assert.equal(await page.locator('#tools-button').getAttribute('aria-pressed'), 'false');
 
+console.log('Searching every task and message from the keyboard');
+await page.keyboard.press(`${mod}+Shift+f`);
+await waitFor(() => document.querySelector('dialog[aria-label="Search tasks"]') !== null, 10_000);
+const taskSearch = page.locator('dialog[aria-label="Search tasks"]');
+await taskSearch.locator('input').fill('README describes the test project');
+await page.waitForFunction(() => [...document.querySelectorAll('dialog[aria-label="Search tasks"] .search-result .search-line')].some(node => node.textContent?.includes('README describes the test project')), undefined, { timeout: 30_000 });
+await page.screenshot({ path: join(artifacts, 'task-search.png') });
+await taskSearch.locator('.search-result').filter({ has: page.locator('.search-line') }).filter({ hasText: 'README describes the test project' }).first().click();
+await waitFor(() => document.querySelector('dialog[aria-label="Search tasks"]') === null, 10_000);
+await page.waitForFunction(() => [...document.querySelectorAll('#conversation article')].some(node => node.classList.contains('flash')), undefined, { timeout: 20_000 });
+assert.match(await text('#conversation'), /The README describes the test project\./);
+console.log('Task search opened the match and flashed its reply');
+
 console.log('Attaching a workspace skill to the message from the composer');
 await page.click('#attach-file');
 await page.locator('#plus-menu .plus-option', { hasText: 'Add skill' }).click();

@@ -8,6 +8,8 @@ import { OpenCode, type JobSubagent, type OpenCodeClient, type FormInfo, type Se
 import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpRuntimeStatus, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary, AutoSettings } from '../shared/contracts.js';
 import { autoModelCandidates } from '../shared/contracts.js';
 import { providerPreset } from '../shared/providers.js';
+import { sidecarEnvironment } from '../shared/sidecar.js';
+import { DEFAULT_LIMIT_COOLDOWN_MS, limitResetAt, resetLabel } from '../shared/limits.js';
 import { mapMessages, mapPermission, mapQuestion, mapSession, locatedSession, answerForm } from './engine-mapping.js';
 import { annotateAttention, attentionRequests } from './attention.js';
 import { AttentionLog, permissionSummary, questionSummary } from './attention-log.js';
@@ -15,6 +17,7 @@ import { buildActivity } from './activity.js';
 import { buildBackgroundRuns } from './background.js';
 import { mapQueuedMessages } from './queue.js';
 import { composeMessage, loadProjectInstructions } from './context.js';
+import { loadAtlasIndex } from './atlas-index.js';
 import { summarizeUsage } from './usage.js';
 import { mapStreamEvent } from './streaming.js';
 import { defaultShell } from './platform.js';
@@ -102,36 +105,6 @@ export function withinRoot(root: string, target: string, platform: NodeJS.Platfo
 
 function inside(root: string, target: string): boolean {
   return withinRoot(root, target);
-}
-
-export function sidecarEnvironment(root: string, password: string, configPath: string, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
-  const path = platform === 'win32' ? win32 : posix;
-  const home = path.join(root, 'home');
-  const pick = (...names: string[]) => names.flatMap((name) => (process.env[name] === undefined ? [] : [[name, process.env[name]!] as const]));
-  const fallbackPath = platform === 'win32'
-    ? process.env.PATH || process.env.Path || ''
-    : '/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin';
-  const env: NodeJS.ProcessEnv = Object.fromEntries([
-    ['HOME', home],
-    ['XDG_CONFIG_HOME', path.join(root, 'config')],
-    ['XDG_DATA_HOME', path.join(root, 'data')],
-    ['XDG_CACHE_HOME', path.join(root, 'cache')],
-    ['XDG_STATE_HOME', path.join(root, 'state')],
-    ...(platform === 'win32' ? [
-      ['USERPROFILE', home],
-      ['APPDATA', path.join(home, 'AppData', 'Roaming')],
-      ['LOCALAPPDATA', path.join(home, 'AppData', 'Local')],
-    ] : []),
-    ['OPENCODE_CONFIG_DIR', path.join(root, 'config', 'opencode')],
-    ['OPENCODE_CONFIG', configPath],
-    ['OPENCODE_CONFIG_PROJECT_DISABLE', '1'],
-    ['OPENCODE_DISABLE_CLAUDE_CODE', '1'],
-    ['OPENCODE_PASSWORD', password],
-    ['OPENCODE_CLIENT', 'relay'],
-    ['PATH', process.env.PATH || fallbackPath],
-    ...pick('TMPDIR', 'LANG', 'LC_ALL', 'LC_CTYPE', 'TERM', 'SHELL', 'USER', 'LOGNAME'),
-  ]);
-  return env;
 }
 
 const askAll = [{ action: '*', resource: '*', effect: 'ask' as const }];
@@ -245,16 +218,18 @@ export class Engine {
   client!: OpenCodeClient;  private child?: ChildProcessWithoutNullStreams;
   private endpoint?: string;
   private password = '';
+  private keepConfig = false;
   private directory = '';
   private workspaces: string[] = [];
   private providers: ProviderInput[] = [];
   private autoSessions = new Map<string, { settings?: AutoSettings; tried: Set<string>; current?: string }>();
+  // Sessions created but not yet prompted: their first message carries the Atlas index.
+  private freshSessions = new Map<string, string>();
+  // Model id -> epoch ms when the provider said the model works again.
   private modelLimits = new Map<string, number>();
-  // Rate-limit / credits failures are remembered so the model menu can flag them.
-  private static readonly LIMIT_TTL = 6 * 60 * 60 * 1000;
 
-  private recordLimit(id: string): void {
-    this.modelLimits.set(id, Date.now());
+  private recordLimit(id: string, detail?: string): void {
+    this.modelLimits.set(id, (detail ? limitResetAt(detail) : undefined) ?? Date.now() + DEFAULT_LIMIT_COOLDOWN_MS);
     this.emit({ type: 'models-changed' });
     void this.persistLimits();
   }
@@ -269,8 +244,9 @@ export class Engine {
     if (!this.directory) return;
     const path = join(this.directory, 'model-limits.json');
     const data: Record<string, number> = {};
-    for (const [id, at] of this.modelLimits) {
-      if (Date.now() - at <= Engine.LIMIT_TTL) data[id] = at;
+    const now = Date.now();
+    for (const [id, until] of this.modelLimits) {
+      if (until > now) data[id] = until;
       else this.modelLimits.delete(id);
     }
     try { await writeFile(path, JSON.stringify(data), { mode: 0o600 }); } catch { /* best effort */ }
@@ -282,16 +258,16 @@ export class Engine {
       const parsed = JSON.parse(await readFile(join(this.directory, 'model-limits.json'), 'utf8')) as Record<string, unknown>;
       const now = Date.now();
       this.modelLimits.clear();
-      for (const [id, at] of Object.entries(parsed)) {
-        if (typeof at === 'number' && now - at <= Engine.LIMIT_TTL) this.modelLimits.set(id, at);
+      for (const [id, until] of Object.entries(parsed)) {
+        if (typeof until === 'number' && until > now) this.modelLimits.set(id, until);
       }
     } catch { /* first run or corrupt file */ }
   }
 
   private isLimited(id: string): boolean {
-    const at = this.modelLimits.get(id);
-    if (at === undefined) return false;
-    if (Date.now() - at > Engine.LIMIT_TTL) { this.modelLimits.delete(id); return false; }
+    const until = this.modelLimits.get(id);
+    if (until === undefined) return false;
+    if (until <= Date.now()) { this.modelLimits.delete(id); return false; }
     return true;
   }
   private mcp: McpServer[] = [];
@@ -311,6 +287,7 @@ export class Engine {
     await this.stop();
     this.stopped = false;
     this.directory = directory; this.providers = providers; this.mcp = mcp;
+    this.freshSessions.clear();
     this.workspaces = [...new Set(workspaces.filter((path) => path && path !== directory))];
     await this.loadLimits();
     this.status = { state: 'starting', detail: 'Starting local engine' };
@@ -381,7 +358,7 @@ export class Engine {
   private async discardConfig(): Promise<void> {
     const path = this.configPath;
     this.configPath = undefined;
-    if (path) await unlink(path).catch(() => {});
+    if (path && !this.keepConfig) await unlink(path).catch(() => {});
   }
 
   async refreshSkills(expected: string[] = []): Promise<void> {
@@ -510,10 +487,11 @@ export class Engine {
     };
   }
 
-  async createSession(title = 'New task'): Promise<SessionSummary> {
-    const session = await this.client.session.create({ location: { directory: this.directory }, title: title.trim() || 'New task', agent: 'build', permissions: sessionRules('ask') });
-    this.browser?.attach(session.id, this.directory);
-    return locatedSession(session, false, this.directory);
+  async createSession(title = 'New task', directory: string = this.directory): Promise<SessionSummary> {
+    const session = await this.client.session.create({ location: { directory }, title: title.trim() || 'New task', agent: 'build', permissions: sessionRules('ask') });
+    this.freshSessions.set(session.id, directory);
+    this.browser?.attach(session.id, directory);
+    return locatedSession(session, false, directory);
   }
 
   async forkSession(sessionID: string, messageID: string): Promise<SessionSummary> {
@@ -529,6 +507,10 @@ export class Engine {
   }
 
   async deleteSession(sessionID: string): Promise<void> { await this.client.session.remove({ sessionID }); }
+
+  async moveSession(sessionID: string, directory: string): Promise<void> {
+    await this.client.session.move({ sessionID, directory });
+  }
 
   async getMessages(sessionID: string): Promise<ChatMessage[]> {
     const client = this.client;
@@ -589,6 +571,11 @@ export class Engine {
     this.autoCompact = { enabled, threshold };
   }
 
+  /** The terminal launcher starts the engine itself, so it needs the generated config to outlive the app. */
+  keepEngineConfig(keep: boolean): void {
+    this.keepConfig = keep;
+  }
+
   private async maybeCompact(sessionID: string): Promise<void> {
     const config = this.autoCompact;
     if (!config?.enabled || this.compacting.has(sessionID)) return;
@@ -645,7 +632,7 @@ export class Engine {
   private async autoRestart(sessionId: string, detail: string): Promise<void> {
     const entry = this.autoSessions.get(sessionId);
     if (!entry) { this.sessionChanged(sessionId); return; }
-    if (isLimitError(detail) && entry.current) this.recordLimit(entry.current);
+    if (isLimitError(detail) && entry.current) this.recordLimit(entry.current, detail);
     const models = (await this.listModels().catch(() => [] as ModelOption[])).filter(model => !model.limited);
     const candidates = autoModelCandidates(models, entry.settings);
     const next = candidates.find((candidate) => !entry.tried.has(candidate.id));
@@ -682,10 +669,14 @@ export class Engine {
       ? (await this.listAgents()).filter((agent) => requestedAgents.has(agent.name)).map((agent) => ({ name: agent.name }))
       : [];
     const context: ContextBlock[] = Array.isArray(input.context) ? input.context : [];
+    const freshDirectory = this.freshSessions.get(input.sessionId);
+    const atlasIndex = freshDirectory ? await loadAtlasIndex(freshDirectory).catch(() => undefined) : undefined;
     const projectInstructions = await loadProjectInstructions(this.directory);
-    const withProjectInstructions: ContextBlock[] = projectInstructions
-      ? [{ label: `Project instructions — ${projectInstructions.label}`, text: projectInstructions.text }, ...context]
-      : context;
+    const withProjectInstructions: ContextBlock[] = [
+      ...(projectInstructions ? [{ label: `Project instructions — ${projectInstructions.label}`, text: projectInstructions.text }] : []),
+      ...(atlasIndex ? [{ label: 'Atlas — project knowledge', text: atlasIndex }] : []),
+      ...context,
+    ];
     const composed = composeMessage(input.text, withProjectInstructions);
     const prefix = input.planOnly
       ? 'Plan only: do not create or modify files. Inspect what you need and reply with a concrete plan, the files you would change, and the commands you would run.\n\n'
@@ -702,7 +693,8 @@ export class Engine {
       const available = models.filter(model => !model.limited);
       candidates = autoModelCandidates(available, input.autoSettings);
       if (!candidates.length && models.some(model => model.connected)) {
-        throw new Error('All connected models are rate-limited or no longer available. Wait for quotas to reset, update your provider model list, or add another provider.');
+        const nextReset = models.filter(model => model.limitedUntil).map(model => model.limitedUntil as number).sort((a, b) => a - b)[0];
+        throw new Error(`All available models are rate-limited. ${nextReset ? resetLabel(nextReset) : 'Wait for quotas to reset'}, or add another provider.`);
       }
     }
 
@@ -727,10 +719,11 @@ export class Engine {
           },
         });
         this.clearLimit(candidate.id);
+        if (freshDirectory) this.freshSessions.delete(input.sessionId);
         if (input.auto) this.autoSessions.set(input.sessionId, { settings: input.autoSettings, tried: new Set([candidate.id]), current: candidate.id });
         return;
       } catch (error) {
-        if (isLimitError(error)) this.recordLimit(candidate.id);
+        if (isLimitError(error)) this.recordLimit(candidate.id, error instanceof Error ? error.message : String(error));
         lastError = error;
       }
     }
@@ -860,11 +853,16 @@ export class Engine {
         variants?: Array<{ id: string }>;
         limit?: { context?: number };
       };
+      const id = `${model.providerID}::${model.modelID}`;
+      const limited = this.isLimited(id);
+      const limitedUntil = this.modelLimits.get(id);
       return {
-        id: `${model.providerID}::${model.modelID}`, providerID: model.providerID, modelID: model.modelID,
+        id, providerID: model.providerID, modelID: model.modelID,
         name: `${model.providerID} · ${model.name}`, connected: connected.has(model.providerID as ProviderInput['id']) || model.providerID === 'opencode',
+        engineHosted: model.providerID === 'opencode',
         free: !detail.cost?.length || detail.cost.every((entry) => !entry.input && !entry.output),
-        limited: this.isLimited(`${model.providerID}::${model.modelID}`),
+        limited,
+        ...(limited && limitedUntil ? { limitedUntil } : {}),
         cost: detail.cost?.[0] ? ((detail.cost[0].input ?? 0) + (detail.cost[0].output ?? 0)) : 0,
         variants: (detail.variants ?? []).map((entry) => entry.id),
         context: detail.limit?.context,

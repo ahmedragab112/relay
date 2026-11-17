@@ -40,6 +40,7 @@
         <button id="search-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m15.6 15.6 4.4 4.4"/></svg></span><span class="nav-label" data-i18n="nav.search">Search</span><kbd data-shortcut="Mod+P">⌘ P</kbd></button>
         <button id="attention-button" class="nav-button" aria-pressed="false" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 15.5V11a6 6 0 1 0-12 0v4.5l-1.5 2h15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg></span><span class="nav-label" data-i18n="nav.attention">Attention</span><span id="attention-count" class="attention-count" hidden>0</span></button>
         <button id="automation-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 9A8 8 0 0 1 18 6.6l2 2.4"/><path d="M20 4.6V9h-4.4"/><path d="M19.5 15A8 8 0 0 1 6 17.4L4 15"/><path d="M4 19.4V15h4.4"/></svg></span><span class="nav-label" data-i18n="nav.automation">Automation</span></button>
+        <button id="atlas-button" class="nav-button" aria-pressed="false" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.5 5.6A1.6 1.6 0 0 1 6.1 4H11v16H6.1a1.6 1.6 0 0 1-1.6-1.6z"/><path d="M19.5 5.6A1.6 1.6 0 0 0 17.9 4H13v16h4.9a1.6 1.6 0 0 0 1.6-1.6z"/></svg></span><span class="nav-label" data-i18n="nav.atlas">Atlas</span></button>
       </nav>
       <div class="section-label">RECENT TASKS <button id="refresh-tasks" class="icon-button" aria-label="Refresh tasks">↻</button></div>
       <div id="task-list" class="task-list"><p class="small muted">Loading workspace…</p></div>
@@ -78,6 +79,10 @@
         <form id="composer" class="composer">
           <textarea id="prompt" rows="3" aria-label="Message the agent" data-i18n-placeholder="composer.placeholder" placeholder="Describe what you’d like to build…" disabled></textarea>
           <div class="composer-actions">
+            <div class="scope-wrap">
+              <button type="button" id="scope-chip" class="scope-chip" title="Task folder" aria-label="Task folder" aria-haspopup="menu" aria-expanded="false" hidden></button>
+              <div id="scope-menu" class="plus-menu scope-menu" role="menu" aria-label="Task folder" hidden></div>
+            </div>
             <div class="plus-wrap">
               <button type="button" id="attach-file" class="icon-button plus-button" title="Add context" aria-label="Add context" aria-haspopup="menu" aria-expanded="false">＋</button>
               <div id="plus-menu" class="plus-menu" role="menu" aria-label="Add context" hidden></div>
@@ -143,6 +148,39 @@
         <div id="tools-chips" class="extension-chips" role="group" aria-label="Filter"></div>
       </div>
       <div id="tools-body" class="tools-body" aria-live="polite"></div>
+    </section>
+    <section id="atlas-page" class="tools-page atlas-page" aria-label="Atlas" hidden>
+      <header class="tools-head">
+        <div class="tools-copy">
+          <h2 data-i18n="atlas.title">Atlas</h2>
+          <p id="atlas-summary" class="tools-summary">Project knowledge, written by the agent and kept inside this project.</p>
+        </div>
+        <span class="grow"></span>
+        <div class="atlas-modes" role="group" aria-label="Atlas view">
+          <button id="atlas-mode-pages" class="atlas-mode" type="button" aria-pressed="true">Pages</button>
+          <button id="atlas-mode-cards" class="atlas-mode" type="button" aria-pressed="false" disabled>Cards</button>
+        </div>
+        <select id="atlas-language" class="atlas-language" aria-label="Atlas language"><option value="en">English</option><option value="ar">العربية</option></select>
+        <button id="atlas-generate" class="button primary" type="button" disabled>Generate</button>
+        <button id="atlas-cancel" class="button" type="button" hidden>Cancel</button>
+        <button id="atlas-sync" class="button" type="button" title="Adopt Markdown edited outside Relay" hidden>Sync</button>
+        <button id="atlas-refresh" class="icon-button" aria-label="Refresh Atlas" title="Refresh">↻</button>
+        <button id="atlas-close" class="icon-button" aria-label="Close Atlas" title="Close">×</button>
+      </header>
+      <div class="atlas-layout">
+        <nav id="atlas-tree" class="atlas-tree" aria-label="Atlas pages"></nav>
+        <div class="atlas-main">
+          <div class="atlas-page-bar">
+            <span id="atlas-page-label" class="atlas-page-label"></span>
+            <span class="grow"></span>
+            <span id="atlas-page-badge" class="atlas-badge" title="Edited by hand — Update keeps this page as it is." hidden>Edited</span>
+            <button id="atlas-edit" class="button" type="button" hidden>Edit page</button>
+            <button id="atlas-save" class="button primary" type="button" hidden>Save</button>
+            <button id="atlas-cancel-edit" class="button" type="button" hidden>Cancel</button>
+          </div>
+          <article id="atlas-reader" class="atlas-reader" aria-live="polite"></article>
+        </div>
+      </div>
     </section>
     <div id="inspector-resizer" class="inspector-resizer" role="separator" aria-orientation="vertical" aria-label="Resize project inspector" aria-controls="inspector" title="Drag to resize · double-click to hide the inspector" tabindex="0"></div>
     <aside id="inspector" class="inspector" aria-label="File inspector">

@@ -1,7 +1,7 @@
 import { createServer } from 'vite';
 import { build as bundle } from 'esbuild';
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { readFile, chmod } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import electronPath from 'electron';
 import { stageEngine } from './engine.mjs';
@@ -16,6 +16,34 @@ server.printUrls();
 const shared = { bundle: true, platform: 'node', target: 'node22', format: 'cjs', external: ['electron'], logLevel: 'warning', sourcemap: 'inline' };
 await bundle({ ...shared, entryPoints: [join(root, 'src/main/index.ts')], outfile: join(root, 'dist/main/index.cjs') });
 await bundle({ ...shared, entryPoints: [join(root, 'src/preload/index.ts')], outfile: join(root, 'dist/preload/index.cjs') });
+
+const relayctl = join(root, 'dist', 'relayctl.mjs');
+await bundle({
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  logLevel: 'warning',
+  sourcemap: 'inline',
+  entryPoints: [join(root, 'src/cli/index.ts')],
+  outfile: relayctl,
+  banner: { js: '#!/usr/bin/env node' },
+});
+await chmod(relayctl, 0o755);
+
+const relay = join(root, 'dist', 'relay.mjs');
+await bundle({
+  bundle: true,
+  platform: 'node',
+  target: 'node20',
+  format: 'esm',
+  logLevel: 'warning',
+  sourcemap: 'inline',
+  entryPoints: [join(root, 'src/cli/relay.ts')],
+  outfile: relay,
+  banner: { js: '#!/usr/bin/env node' },
+});
+await chmod(relay, 0o755);
 
 const version = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')).devDependencies['@opencode/cli'];
 await stageEngine({ root, version });

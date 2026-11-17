@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 import type {
   AppEvent, AgentMode, AutomationInput, DictationInput, McpServer, PermissionDecision, ProviderInput, RelayAPI, RunCommandInput, SendMessageInput, AccessLevel,
 } from '../shared/contracts.js';
+import type { AtlasLanguage } from '../shared/atlas.js';
 
 const invoke = <T>(channel: string, ...args: unknown[]): Promise<T> => ipcRenderer.invoke(channel, ...args);
 const on = <T extends unknown[]>(channel: string, listener: (...args: T) => void): (() => void) => {
@@ -22,7 +23,16 @@ const api: RelayAPI = {
   getUsage: (sessionId: string) => invoke('sessions:usage', sessionId),
   compactSession: (sessionId: string) => invoke('sessions:compact', sessionId),
   getSessionDigest: (sessionId: string) => invoke('sessions:digest', sessionId),
-  createSession: (title?: string) => invoke('sessions:create', title),
+  createSession: (title?: string, workspaceId?: string) => invoke('sessions:create', title, workspaceId),
+  moveSession: (id: string, workspaceId: string) => invoke('sessions:move', id, workspaceId),
+  revealWorkspace: (id: string) => invoke('workspace:reveal', id),
+  atlasView: (language: AtlasLanguage) => invoke('atlas:view', language),
+  atlasPage: (language: AtlasLanguage, slug: string) => invoke('atlas:page', language, slug),
+  atlasCards: (language: AtlasLanguage) => invoke('atlas:cards', language),
+  saveAtlasPage: (language: AtlasLanguage, slug: string, text: string) => invoke('atlas:savePage', language, slug, text),
+  syncAtlas: (language: AtlasLanguage) => invoke('atlas:sync', language),
+  generateAtlas: (language: AtlasLanguage) => invoke('atlas:generate', language),
+  cancelAtlas: () => invoke('atlas:cancel'),
   forkSession: (id: string, messageId: string) => invoke('sessions:fork', id, messageId),
   renameSession: (id: string, title: string) => invoke('sessions:rename', id, title),
   deleteSession: (id: string) => invoke('sessions:delete', id),
@@ -66,6 +76,7 @@ const api: RelayAPI = {
   undoChange: (path: string) => invoke('changes:undo', path),
   listFiles: (path?: string) => invoke('files:list', path),
   searchFiles: (query: string, mode) => invoke('files:search', query, mode),
+  searchHistory: (query: string) => invoke('history:search', query),
   readFile: (path: string) => invoke('files:read', path),
   saveFile: (path: string, content: string, revision: string) => invoke('files:save', path, content, revision),
   savePreferences: (values) => invoke('preferences:save', values),
@@ -89,6 +100,10 @@ const api: RelayAPI = {
   runAutomation: (id: string) => invoke('automation:run', id),
   revealAutomationArtifact: (id: string) => invoke('automation:reveal', id),
   transcribeAudio: (input: DictationInput) => invoke('dictation:transcribe', input),
+  updateStatus: () => invoke('update:status'),
+  checkForUpdates: () => invoke('update:check'),
+  downloadUpdate: () => invoke('update:download'),
+  installUpdate: () => invoke('update:install'),
   minimizeWindow: () => invoke('window:minimize'),
   zoomWindow: () => invoke('window:zoom'),
   closeWindow: () => invoke('window:close'),

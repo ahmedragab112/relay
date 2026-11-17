@@ -3,8 +3,13 @@ import { byId, button, el, errorText, notify, report } from './dom';
 import { dialog } from './dialog';
 import { resolveInitialModel } from './state';
 import { groupModels, resolveVariant, variantLabel } from './model-menu';
+import { resetLabel } from '../shared/limits';
 import { Dictation } from './dictation';
 import { filterMentionables, parseMentionToken, type MentionSource } from './mention';
+import { ATLAS_LANGUAGE_KEY, ATLAS_ROOT, isAtlasLanguage, type AtlasCard, type AtlasLanguage, type AtlasPage } from '../shared/atlas';
+
+const KNOWLEDGE_COMMAND: CommandOption = { name: 'knowledge', description: 'Attach Atlas pages or module cards to this message' };
+const atlasLocation = (language: AtlasLanguage, slug: string): string => `${ATLAS_ROOT}/${language}/${slug}.md`;
 
 interface Draft {
   text: string; files: string[]; access: AccessLevel; variant: string; skills: string[]; command: string;
@@ -31,6 +36,7 @@ export class Composer {
   private sending = new Set<string>();
   private stopping = new Set<string>();
   private drafts = new Map<string, Draft>();
+  private preserved?: Draft;
   private files: string[] = [];
   private skills: SkillOption[] = [];
   private selectedSkills: string[] = [];
@@ -52,7 +58,7 @@ export class Composer {
   private preferredVariant = '';
   private freeOnly = false;
   private autoModel = false;
-  private autoSettings: AutoSettings = { includeFree: true, maxTokens: 4096, modelIds: [] };
+  private autoSettings: AutoSettings = { includeFree: true, includeEngineHosted: false, maxTokens: 4096, modelIds: [] };
   private inputWhileRunning = false;
   private commandDetail = false;
   private goalDrivenByDefault = false;
@@ -250,6 +256,8 @@ export class Composer {
   private clearSkillSuggestions(): void { byId('skill-suggestions').replaceChildren(); }
 
   reset(): void {
+    const previous = this.session?.id;
+    const preserved = this.preserved; this.preserved = undefined;
     this.workspaceGeneration++;
     this.dictation.cancel();
     this.drafts.clear(); this.sending.clear(); this.stopping.clear(); this.session = undefined;
@@ -258,17 +266,33 @@ export class Composer {
     this.commands = []; this.command = ''; this.closeMenu(); this.clearSkillSuggestions();
     this.closeMentionMenu(); this.mentionCache = undefined;
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.sync();
+    if (preserved && previous) this.drafts.set(previous, preserved);
   }
 
-  select(session?: SessionSummary): void {
-    if (this.session?.id === session?.id) { this.session = session; this.sync(); return; }
-    if (this.session) this.drafts.set(this.session.id, {
+  /** Keeps the unfinished message through the next reset, e.g. when the task's folder changes. */
+  preserve(): void { this.preserved = this.readDraft(); }
+
+  /** Drops a preserved draft when the folder did not actually change. */
+  cancelPreserved(): void { this.preserved = undefined; }
+
+  /** Hands a preserved draft to the task that replaced it after a folder switch. */
+  carry(from: string): void {
+    const draft = this.drafts.get(from);
+    if (!draft || !this.session) return;
+    this.drafts.delete(from);
+    this.drafts.set(this.session.id, draft);
+    this.applyDraft(draft);
+  }
+
+  private readDraft(): Draft {
+    return {
       text: this.input.value, files: [...this.files], access: this.access.value as AccessLevel, variant: this.preferredVariant,
       skills: [...this.selectedSkills], command: this.command, planOnly: this.planOnly,
       agents: [...this.selectedAgents], context: [...this.contextBlocks],
-    });
-    this.session = session;
-    const draft = session ? this.drafts.get(session.id) : undefined;
+    };
+  }
+
+  private applyDraft(draft?: Draft): void {
     this.input.value = draft?.text ?? '';
     this.files = [...(draft?.files ?? [])];
     this.selectedSkills = [...(draft?.skills ?? [])];
@@ -276,11 +300,18 @@ export class Composer {
     this.contextBlocks = [...(draft?.context ?? [])];
     this.planOnly = draft?.planOnly ?? false;
     this.command = draft?.command ?? '';
-    this.access.value = draft?.access ?? this.access.value;
+    if (draft?.access) this.access.value = draft.access;
     this.access.dataset.access = this.access.value;
-    this.preferredVariant = draft?.variant ?? this.preferredVariant;
+    if (draft?.variant) this.preferredVariant = draft.variant;
     this.closeMenu(); this.closeMentionMenu(); this.clearSkillSuggestions();
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.renderModelLabel(); this.sync();
+  }
+
+  select(session?: SessionSummary): void {
+    if (this.session?.id === session?.id) { this.session = session; this.sync(); return; }
+    if (this.session) this.drafts.set(this.session.id, this.readDraft());
+    this.session = session;
+    this.applyDraft(session ? this.drafts.get(session.id) : undefined);
   }
 
   setEngine(engine: EngineStatus): void { this.ready = engine.state === 'ready'; this.sync(); }
@@ -356,9 +387,10 @@ export class Composer {
     row.setAttribute('aria-selected', String(selected));
     row.disabled = !model.connected;
     row.append(el('span', 'truncate', model.name));
-    if (model.free) row.append(el('span', 'pill', 'Free'));
+    if (model.engineHosted) row.append(el('span', 'pill', 'OpenCode quota'));
+    else if (model.free) row.append(el('span', 'pill', 'Free'));
     if (model.context) row.append(el('span', 'pill', `${Math.round(model.context / 1000)}k`));
-    if (model.limited) row.append(el('span', 'pill limit-pill', 'Limit reached'));
+    if (model.limited) row.append(el('span', 'pill limit-pill', model.limitedUntil ? resetLabel(model.limitedUntil) : 'Limit reached'));
     entry.append(row);
     const active = this.resolvedVariant();
     if (model.variants?.length) {
@@ -385,7 +417,10 @@ export class Composer {
   }
 
   setCommands(commands: CommandOption[]): void {
-    this.commands = [...new Map(commands.filter(command => command.name).map(command => [command.name, command])).values()];
+    const merged = new Map<string, CommandOption>();
+    if (!commands.some(command => command.name === 'knowledge')) merged.set('knowledge', KNOWLEDGE_COMMAND);
+    for (const command of commands) if (command.name) merged.set(command.name, command);
+    this.commands = [...merged.values()];
     if (this.command && !this.commands.some(command => command.name === this.command)) {
       this.command = ''; this.renderCommands();
     }
@@ -521,6 +556,113 @@ export class Composer {
       if (!sessions.length) list.append(el('p', '', 'There are no other tasks in this project yet.'));
       body.replaceChildren(list);
     }).catch(error => body.replaceChildren(el('p', 'inline-error', errorText(error))));
+  }
+
+  pickKnowledge(): void {
+    if (!this.session) { notify('Open a task before attaching Atlas knowledge.', true); return; }
+    const modal = dialog('Atlas knowledge');
+    modal.add(el('p', '', 'Attach pages from this project’s Atlas wiki, or module cards, to your next message.'));
+    const body = el('div');
+    body.append(el('p', 'small muted', 'Loading Atlas…'));
+    modal.add(body);
+    void this.loadKnowledge(modal, body).catch(error => body.replaceChildren(el('p', 'inline-error', errorText(error))));
+  }
+
+  private knowledgeLanguage(): AtlasLanguage {
+    const stored = localStorage.getItem(ATLAS_LANGUAGE_KEY);
+    if (isAtlasLanguage(stored)) return stored;
+    return document.documentElement.lang === 'ar' ? 'ar' : 'en';
+  }
+
+  private async loadKnowledge(modal: ReturnType<typeof dialog>, body: HTMLElement): Promise<void> {
+    let language = this.knowledgeLanguage();
+    let view = await window.relay.atlasView(language);
+    if (!view.manifest) {
+      const other: AtlasLanguage = language === 'en' ? 'ar' : 'en';
+      const alternative = await window.relay.atlasView(other);
+      if (alternative.manifest) { language = other; view = alternative; }
+    }
+    const manifest = view.manifest;
+    if (!manifest?.pages.length) {
+      body.replaceChildren(el('p', '', 'Atlas has no pages for this project yet. Open Atlas from the header and press Generate.'));
+      return;
+    }
+    const cards = view.cards.present ? await window.relay.atlasCards(language) : [];
+    const pickedPages = new Set<string>();
+    const pickedCards = new Set<string>();
+    const list = el('div', 'knowledge-pick');
+    list.append(el('p', 'section-label', 'Pages'));
+    for (const page of manifest.pages) {
+      const choice = el('label', 'choice');
+      const input = el('input');
+      input.type = 'checkbox';
+      input.addEventListener('change', () => { if (input.checked) pickedPages.add(page.slug); else pickedPages.delete(page.slug); });
+      const copy = el('span');
+      copy.append(el('strong', '', page.title), el('small', '', page.summary || atlasLocation(language, page.slug)));
+      choice.append(input, copy);
+      list.append(choice);
+    }
+    if (cards.length) {
+      list.append(el('p', 'section-label', 'Knowledge cards'));
+      for (const card of cards) {
+        const choice = el('label', 'choice');
+        const input = el('input');
+        input.type = 'checkbox';
+        input.addEventListener('change', () => { if (input.checked) pickedCards.add(card.name); else pickedCards.delete(card.name); });
+        const copy = el('span');
+        copy.append(el('strong', '', card.name), el('small', '', card.summary || card.path || 'Module card'));
+        choice.append(input, copy);
+        list.append(choice);
+      }
+    }
+    const actions = el('div', 'dialog-actions');
+    actions.append(
+      button('Cancel', () => modal.root.close()),
+      button('Attach', () => void this.attachKnowledge(modal, language, manifest.pages, cards, pickedPages, pickedCards), 'button primary'),
+    );
+    body.replaceChildren(list, actions);
+  }
+
+  private async attachKnowledge(
+    modal: ReturnType<typeof dialog>, language: AtlasLanguage, pages: AtlasPage[],
+    cards: AtlasCard[], pickedPages: Set<string>, pickedCards: Set<string>,
+  ): Promise<void> {
+    const pageSlugs = [...pickedPages];
+    const chosenCards = cards.filter(card => pickedCards.has(card.name));
+    if (!pageSlugs.length && !chosenCards.length) { notify('Choose at least one page or card.', true); return; }
+    modal.busy(true);
+    let attached = 0;
+    let skipped = 0;
+    for (const slug of pageSlugs) {
+      if (this.contextBlocks.length >= 4) { skipped++; continue; }
+      try {
+        const text = await window.relay.atlasPage(language, slug);
+        const title = pages.find(page => page.slug === slug)?.title ?? slug;
+        if (!text.trim()) { skipped++; continue; }
+        this.contextBlocks.push({ label: `Atlas: ${title}`, text });
+        attached++;
+      } catch { skipped++; }
+    }
+    for (const card of chosenCards) {
+      if (this.contextBlocks.length >= 4) { skipped++; continue; }
+      const lines = [
+        card.path ? `Path: ${card.path}` : '',
+        card.summary ?? '',
+        card.dependsOn.length ? `Depends on: ${card.dependsOn.join(', ')}` : '',
+        card.relatedTo.length ? `Related to: ${card.relatedTo.join(', ')}` : '',
+        card.page ? `Atlas page: ${card.page}` : '',
+      ].filter(Boolean);
+      if (!lines.length) { skipped++; continue; }
+      this.contextBlocks.push({ label: `Atlas card: ${card.name}`, text: lines.join('\n') });
+      attached++;
+    }
+    this.renderTags();
+    this.sync();
+    modal.busy(false);
+    modal.root.close();
+    this.input.focus();
+    if (skipped) notify(`Attached ${attached}. Remove a context tag before adding the rest.`, attached === 0);
+    else notify(`Attached ${attached} Atlas ${attached === 1 ? 'source' : 'sources'}.`);
   }
 
   attach(path: string): void {
@@ -788,6 +930,13 @@ export class Composer {
   }
 
   private chooseCommand(command: CommandOption): void {
+    if (command === KNOWLEDGE_COMMAND) {
+      this.input.value = '';
+      this.closeMenu();
+      this.sync();
+      this.pickKnowledge();
+      return;
+    }
     this.command = command.name;
     this.input.value = '';
     this.closeMenu();

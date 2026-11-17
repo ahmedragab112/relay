@@ -1,4 +1,10 @@
 import type { ConfigurableProviderID } from './providers';
+import type { AtlasCard, AtlasLanguage, AtlasView } from './atlas';
+
+export type { UpdatePhase, UpdateStatus, UpdateSignal } from './updates';
+import type { UpdateStatus } from './updates';
+export type { HistoryEntry, HistoryHit, HistoryMessage } from './history';
+import type { HistoryHit } from './history';
 
 export type AgentMode = 'build' | 'plan';
 export type AccessLevel = 'read' | 'ask' | 'auto' | 'full';
@@ -11,6 +17,9 @@ export interface Workspace {
   path: string;
   lastOpened: number;
 }
+
+/** Built-in space for tasks that are not attached to a project folder. */
+export const SCRATCH_WORKSPACE_ID = 'scratch';
 
 export interface ProviderInput {
   id: ConfigurableProviderID;
@@ -51,6 +60,7 @@ export interface GeneralSettings {
   turnNotifications: boolean;
   turnSound: boolean;
   requestNotifications: boolean;
+  autoUpdate: boolean;
   language: Language;
   layout: Layout;
   accent: Accent;
@@ -64,6 +74,7 @@ export interface ContextSettings {
 
 export interface AutoSettings {
   includeFree: boolean;
+  includeEngineHosted: boolean;
   maxTokens: number;
   modelIds: string[];
 }
@@ -135,6 +146,8 @@ export interface ModelOption {
   context?: number;
   cost?: number;
   limited?: boolean;
+  limitedUntil?: number;
+  engineHosted?: boolean;
 }
 
 export function autoModelCandidates(models: ModelOption[], settings?: AutoSettings): Array<{ id: string; variant: string }> {
@@ -143,6 +156,7 @@ export function autoModelCandidates(models: ModelOption[], settings?: AutoSettin
   return models
     .filter((model) => model.connected)
     .filter((model) => includeFree || !model.free)
+    .filter((model) => settings?.includeEngineHosted === true || !model.engineHosted)
     .filter((model) => !allowed || allowed.has(model.id))
     .sort((a, b) => (a.cost ?? 0) - (b.cost ?? 0) || (a.context ?? 0) - (b.context ?? 0))
     .slice(0, 6)
@@ -692,6 +706,8 @@ export type AppEvent =
   | { type: 'models-changed' }
   | { type: 'agent-open-page'; url: string }
   | { type: 'auto-switched'; sessionId: string; model: string; detail: string }
+  | { type: 'atlas'; workspaceId: string; view: AtlasView }
+  | { type: 'update'; status: UpdateStatus }
   | { type: 'error'; message: string };
 
 export interface RelayAPI {
@@ -700,7 +716,16 @@ export interface RelayAPI {
   switchWorkspace(id: string): Promise<AppState>;
   listSessions(): Promise<SessionSummary[]>;
   listAllSessions(): Promise<SessionSummary[]>;
-  createSession(title?: string): Promise<SessionSummary>;
+  createSession(title?: string, workspaceId?: string): Promise<SessionSummary>;
+  moveSession(id: string, workspaceId: string): Promise<void>;
+  revealWorkspace(id: string): Promise<void>;
+  atlasView(language: AtlasLanguage): Promise<AtlasView>;
+  atlasPage(language: AtlasLanguage, slug: string): Promise<string>;
+  atlasCards(language: AtlasLanguage): Promise<AtlasCard[]>;
+  saveAtlasPage(language: AtlasLanguage, slug: string, text: string): Promise<AtlasView>;
+  syncAtlas(language: AtlasLanguage): Promise<AtlasView>;
+  generateAtlas(language: AtlasLanguage): Promise<AtlasView>;
+  cancelAtlas(): Promise<void>;
   forkSession(id: string, messageId: string): Promise<SessionSummary>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;
@@ -750,6 +775,7 @@ export interface RelayAPI {
   undoChange(path: string): Promise<'restored' | 'deleted'>;
   listFiles(path?: string): Promise<FileEntry[]>;
   searchFiles(query: string, mode: SearchMode): Promise<FileSearchResult[]>;
+  searchHistory(query: string): Promise<HistoryHit[]>;
   readFile(path: string): Promise<FileDocument>;
   saveFile(path: string, content: string, revision: string): Promise<FileDocument>;
   savePreferences(values: PreferencesPatch): Promise<AppState>;
@@ -773,6 +799,10 @@ export interface RelayAPI {
   runAutomation(id: string): Promise<AutomationState>;
   revealAutomationArtifact(id: string): Promise<void>;
   transcribeAudio(input: DictationInput): Promise<string>;
+  updateStatus(): Promise<UpdateStatus>;
+  checkForUpdates(): Promise<UpdateStatus>;
+  downloadUpdate(): Promise<UpdateStatus>;
+  installUpdate(): Promise<void>;
   minimizeWindow(): Promise<void>;
   zoomWindow(): Promise<void>;
   closeWindow(): Promise<void>;

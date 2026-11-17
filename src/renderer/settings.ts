@@ -1,8 +1,9 @@
-import type { Accent, AppState, GeneralSettings, Layout, ModelOption, PreferencesPatch, ProviderInput, SessionSummary, Theme } from '../shared/contracts';
+import type { Accent, AppState, GeneralSettings, Layout, ModelOption, PreferencesPatch, ProviderInput, SessionSummary, Theme, UpdateStatus } from '../shared/contracts';
 import { CONFIGURABLE_PROVIDERS, providerName, providerPreset, type ConfigurableProviderID } from '../shared/providers';
 import { byId, button, el, errorText, field, option, report } from './dom';
 import { confirmAction } from './dialog';
 import { applyLanguage } from './i18n';
+import { resetLabel } from '../shared/limits';
 
 const groupLabel: Record<string, string> = { free: 'Free', local: 'Local', paid: 'Paid', custom: 'Custom' };
 type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'archive' | 'about';
@@ -14,8 +15,11 @@ const navigation: Array<{ group: string; items: Array<{ id: Category; label: str
 ];
 
 let settingsWired = false;
+let disposeUpdates: (() => void) | undefined;
 
 export function closeSettings(): void {
+  disposeUpdates?.();
+  disposeUpdates = undefined;
   byId('settings-shell').replaceChildren();
   byId('settings-page').hidden = true;
   byId('app').classList.remove('settings-open');
@@ -92,10 +96,51 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     return block;
   };
 
+  const updateLine = (status: UpdateStatus): string => {
+    switch (status.phase) {
+      case 'checking': return 'Checking for a newer version…';
+      case 'available': return `Version ${status.version} is available. Download it when you are ready.`;
+      case 'downloading': return `Downloading version ${status.version}… ${status.progress ?? 0}%`;
+      case 'downloaded': return `Version ${status.version} is downloaded. Restart Relay to install it.`;
+      case 'up-to-date': return 'Relay is up to date.';
+      case 'error': return `Update check failed: ${status.message ?? 'unknown error'}`;
+      default: return 'Relay checks for updates after launch in installed builds.';
+    }
+  };
+
+  const updateSection = (): HTMLElement => {
+    const block = section('Updates');
+    const row = el('div', 'settings-field-row');
+    const copy = el('div', 'settings-copy');
+    const line = el('small', '');
+    copy.append(el('strong', '', 'App updates'), line);
+    const actions = el('div', 'settings-inline');
+    const check = button('Check now', async () => { render(await window.relay.checkForUpdates()); });
+    const download = button('Download', async () => { render(await window.relay.downloadUpdate()); });
+    download.hidden = true;
+    const restart = button('Restart to install', async () => { await window.relay.installUpdate(); }, 'button primary');
+    restart.hidden = true;
+    actions.append(check, download, restart);
+    row.append(copy, actions);
+    const render = (status: UpdateStatus): void => {
+      line.textContent = updateLine(status);
+      check.disabled = status.phase === 'checking' || status.phase === 'downloading';
+      download.hidden = status.phase !== 'available';
+      restart.hidden = status.phase !== 'downloaded';
+    };
+    block.append(
+      toggle('autoUpdate', 'Automatic update checks', 'Look for newer Relay versions after launch. Downloads and installs still wait for you.'),
+      row,
+    );
+    disposeUpdates?.();
+    disposeUpdates = window.relay.onEvent(event => { if (event.type === 'update') render(event.status); });
+    void window.relay.updateStatus().then(render).catch(() => {});
+    return block;
+  };
+
   const general = (): void => {
     pane.append(
-      section('Composer & conversation',
-        toggle('inputWhileRunning', 'Input while running', 'Queue a follow-up while the agent is working instead of locking the composer.'),
+      section('Composer & conversation',        toggle('inputWhileRunning', 'Input while running', 'Queue a follow-up while the agent is working instead of locking the composer.'),
         toggle('slashCommandDisplay', 'Slash command display', 'Show each command’s description in the composer chip.'),
         toggle('skipUnansweredQuestions', 'Silently skip unanswered questions', 'Dismiss agent questions automatically so a run can finish without waiting for you.'),
         toggle('promptSuggestions', 'Prompt suggestions', 'Offer starter prompts when the composer is empty.'),
@@ -115,6 +160,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       section('Files',
         artifactRow(),
       ),
+      updateSection(),
     );
   };
 
@@ -314,6 +360,20 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     });
     includeRow.append(includeCopy, includeInput);
 
+    const hostedRow = el('label', 'settings-toggle');
+    const hostedCopy = el('span', 'settings-copy');
+    hostedCopy.append(el('strong', '', "Include OpenCode's free models"), el('small', '', "Uses OpenCode's own quota, which is metered by its gateway. Off by default; pick one from the model menu to use it explicitly."));
+    const hostedInput = el('input');
+    hostedInput.type = 'checkbox';
+    hostedInput.checked = getState().preferences.auto.includeEngineHosted;
+    hostedInput.addEventListener('change', () => {
+      hostedInput.disabled = true;
+      void save({ auto: { includeEngineHosted: hostedInput.checked } }).then(apply)
+        .catch(error => { hostedInput.checked = getState().preferences.auto.includeEngineHosted; modal.fail(error); })
+        .finally(() => { hostedInput.disabled = false; });
+    });
+    hostedRow.append(hostedCopy, hostedInput);
+
     const maxTokens = el('input');
     maxTokens.type = 'number';
     maxTokens.min = '256';
@@ -348,12 +408,16 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       const saved = getState().preferences.auto.modelIds;
       const current = (): Set<string> => new Set(getState().preferences.auto.modelIds.length ? getState().preferences.auto.modelIds : connected.map(item => item.id));
       modelList.replaceChildren(...connected.map(item => {
+        const hostedOff = item.engineHosted === true && !getState().preferences.auto.includeEngineHosted;
         const row = el('label', 'auto-model-row');
         const copy = el('span', 'auto-model-copy');
-        copy.append(el('strong', '', item.name), el('small', '', `${item.id}${item.free ? ' · free' : ''}${item.limited ? ' · limit reached' : ''}`));
+        const limit = item.limited ? ` · ${item.limitedUntil ? resetLabel(item.limitedUntil) : 'limit reached'}` : '';
+        copy.append(el('strong', '', item.name), el('small', '', `${item.id}${item.free ? ' · free' : ''}${item.engineHosted ? ' · OpenCode quota' : ''}${limit}`));
         const input = el('input');
         input.type = 'checkbox';
-        input.checked = saved.length ? saved.includes(item.id) : true;
+        input.checked = saved.length ? saved.includes(item.id) : !hostedOff;
+        input.disabled = hostedOff;
+        input.title = hostedOff ? "Turn on Include OpenCode's free models to use this model in auto mode." : '';
         input.setAttribute('aria-label', `Include ${item.name}`);
         input.addEventListener('change', () => {
           const next = current();
@@ -369,6 +433,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
 
     pane.append(section('Auto model rotation',
       includeRow,
+      hostedRow,
       maxRow,
       modelField,
       el('p', 'settings-note', 'Auto mode picks the lowest-cost connected model and rotates to the next one when a request fails (rate limits, credits, or invalid models). Use the allowed list to restrict which models may be tried.'),

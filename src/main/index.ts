@@ -1,13 +1,14 @@
 import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, safeStorage, session, shell, systemPreferences, type IpcMainInvokeEvent, type Session, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { Browser } from '@opencode/plugin-browser/rpc';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import type {
   AccessLevel, AgentMode, AppEvent, AppState, AutomationJob, AutomationState, ContextBlock, McpServer, PermissionDecision, PluginCatalogEntry, PluginView, PreferencesPatch, ProviderInput, RunCommandInput, SendMessageInput,
 } from '../shared/contracts.js';
+import { SCRATCH_WORKSPACE_ID } from '../shared/contracts.js';
 import { Engine, type EngineBrowserHooks } from './engine.js';
 import { startBrowserHost, type BrowserHost, type BrowserPageDriver, type BrowserRpc } from './browser.js';
 import { createBrowserDriver } from './browser-page.js';
@@ -27,6 +28,10 @@ import { WorkspaceFiles } from './workspace.js';
 import { accentColor, applicationMenu, credentialStoreLabel, windowChrome, windowMaterial, type Platform } from './platform.js';
 import { engineBinaryName } from '../shared/engine-target.js';
 import { startControlServer } from './control.js';
+import { Updates } from './updater.js';
+import { HistoryIndex } from './history.js';
+import { AtlasRunner } from './atlas.js';
+import { isAtlasLanguage, type AtlasLanguage } from '../shared/atlas.js';
 
 let window: BrowserWindow | undefined;
 let store: SettingsStore;
@@ -36,6 +41,12 @@ let skillLibrary: SkillLibrary;
 const skillRegistry = new SkillRegistry();
 let automation: AutomationStore;
 let scheduler: Scheduler;
+let updates: Updates;
+let history: HistoryIndex;
+let atlas: AtlasRunner;
+let historyTimer: NodeJS.Timeout | undefined;
+let historyPendingFull = false;
+let historyPendingSession: string | undefined;
 let engineRoot = '';
 let files: WorkspaceFiles | undefined;
 let expectedURL = '';
@@ -100,6 +111,10 @@ function engineBinary(): string {
     : join(app.getAppPath(), 'build', 'engine', name);
 }
 
+async function terminalEnabled(): Promise<boolean> {
+  try { await access(join(app.getPath('userData'), 'terminal-enabled')); return true; } catch { return false; }
+}
+
 function catalogDirectory(): string {
   return app.isPackaged ? join(process.resourcesPath, 'catalog') : join(app.getAppPath(), 'catalog');
 }
@@ -136,10 +151,28 @@ function prepareBrowserSession(): void {
 }
 
 function emit(event: AppEvent): void {
+  observeHistory(event);
   let delivered: AppEvent = event;
   if (event.type === 'session-idle') delivered = finishEvent(event);
   else if (event.type === 'permission' || event.type === 'question') requestNotify(event);
   if (window && !window.isDestroyed()) window.webContents.send('app:event', delivered);
+}
+
+// Message changes arrive in bursts while a turn streams; wait for a quiet moment before re-indexing.
+function observeHistory(event: AppEvent): void {
+  if (event.type === 'sessions-changed') historyPendingFull = true;
+  else if (event.type === 'session-changed') historyPendingSession = event.sessionId;
+  else return;
+  if (historyTimer) clearTimeout(historyTimer);
+  historyTimer = setTimeout(() => {
+    historyTimer = undefined;
+    const full = historyPendingFull;
+    const sessionId = historyPendingSession;
+    historyPendingFull = false;
+    historyPendingSession = undefined;
+    void (full || !sessionId ? history.refresh() : history.refreshSession(sessionId));
+  }, 2000);
+  historyTimer.unref();
 }
 
 // A permission or question blocks the agent — surface it as a macOS notification so the
@@ -260,6 +293,11 @@ function needFiles() {
   return files;
 }
 
+function atlasLanguage(value: unknown): AtlasLanguage {
+  if (!isAtlasLanguage(value)) throw new Error('Choose a language for Atlas.');
+  return value;
+}
+
 function accessOf(value: unknown): AccessLevel {
   if (value !== 'read' && value !== 'ask' && value !== 'auto' && value !== 'full') throw new Error('Invalid access level.');
   return value;
@@ -275,6 +313,12 @@ function register(): void {
     return state();
   });
   define('workspace:switch', async (_event, id) => { await store.switchWorkspace(identifier(id)); await restart(); return state(); });
+  define('workspace:reveal', async (_event, id) => {
+    const workspace = store.workspaces.find((item) => item.id === identifier(id));
+    if (!workspace) throw new Error('Open that project first.');
+    const failure = await shell.openPath(workspace.path);
+    if (failure) throw new Error(failure || 'The folder could not be opened.');
+  });
   define('sessions:list', async () => {
     const archived = new Set(store.preferences.archivedSessions);
     const items = (await needEngine().listSessions()).filter((item) => !archived.has(item.id));
@@ -291,11 +335,26 @@ function register(): void {
     const archived = new Set(store.preferences.archivedSessions);
     return (await needEngine().listSessions()).filter((item) => archived.has(item.id));
   });
-  define('sessions:create', async (_event, title) => {
-    if (!store.workspace) throw new Error('Open a project first.');
-    const summary = await needEngine().createSession(text(title ?? 'New task', 'Session title', 512));
+  define('sessions:create', async (_event, title, workspaceId) => {
+    const active = store.workspace;
+    if (!active) throw new Error('Open a project first.');
+    if (workspaceId !== undefined) {
+      const workspace = store.workspaces.find((item) => item.id === identifier(workspaceId));
+      if (!workspace) throw new Error('Open that project first.');
+      if (workspace.id !== active.id) throw new Error('Switch to that project before creating a task in it.');
+    }
+    const summary = await needEngine().createSession(text(title ?? 'New task', 'Session title', 512), active.path);
     sessionTitles.set(summary.id, summary.title);
     return summary;
+  });
+  define('sessions:move', async (_event, id, workspaceId) => {
+    const active = store.workspace;
+    if (!active) throw new Error('Open a project first.');
+    const workspace = store.workspaces.find((item) => item.id === identifier(workspaceId));
+    if (!workspace) throw new Error('Open that project first.');
+    if (workspace.id !== active.id) throw new Error('Switch to that project before moving a task into it.');
+    await needEngine().moveSession(identifier(id), active.path);
+    emit({ type: 'sessions-changed' });
   });
   define('sessions:fork', async (_event, id, messageId) => {
     const summary = await needEngine().forkSession(identifier(id), text(messageId, 'Message', 256));
@@ -315,6 +374,11 @@ function register(): void {
     const sessionId = identifier(id);
     const reactions = store.reactions(sessionId);
     return (await needEngine().getMessages(sessionId)).map((message) => reactions[message.id] ? { ...message, reaction: reactions[message.id] } : message);
+  });
+  define('history:search', async (_event, query) => {
+    const clean = text(query, 'Search text', 200);
+    if (!history.size) await history.refresh();
+    return history.search(clean);
   });
   define('sessions:react', async (_event, id, messageId, reaction) => {
     if (reaction !== null && reaction !== 'like' && reaction !== 'dislike') throw new Error('Choose like or dislike.');
@@ -427,8 +491,13 @@ function register(): void {
     await store.savePreferences(values as PreferencesPatch);
     const context = store.preferences.context;
     engine.setAutoCompact(context.autoCompact, context.compactThreshold);
+    updates?.setAutoCheck(store.preferences.general.autoUpdate);
     return state();
   });
+  define('update:status', () => updates.current);
+  define('update:check', () => updates.check(true));
+  define('update:download', () => updates.download());
+  define('update:install', async () => { updates.install(); });
   define('providers:save', async (_event, value) => { await store.saveProvider(value as ProviderInput); await restart(); return state(); });
   define('providers:remove', async (_event, id) => { await store.removeProvider(id as ProviderInput['id']); await restart(); return state(); });
   define('mcp:list', () => store.mcp);
@@ -529,6 +598,14 @@ function register(): void {
     if (!job?.artifactPath) throw new Error('This automation has no output file yet.');
     shell.showItemInFolder(job.artifactPath);
   });
+  define('atlas:view', async (_event, language) => atlas.view(atlasLanguage(language)));
+  define('atlas:page', async (_event, language, slug) => atlas.page(atlasLanguage(language), text(slug, 'Atlas page', 128)));
+  define('atlas:cards', async (_event, language) => atlas.cards(atlasLanguage(language)));
+  define('atlas:savePage', async (_event, language, slug, body) =>
+    atlas.savePage(atlasLanguage(language), text(slug, 'Atlas page', 128), text(body, 'Atlas page', 1024 * 1024)));
+  define('atlas:sync', async (_event, language) => atlas.sync(atlasLanguage(language)));
+  define('atlas:generate', async (_event, language) => atlas.generate(atlasLanguage(language)));
+  define('atlas:cancel', async () => atlas.cancel());
   define('dictation:transcribe', async (_event, value) => {
     const audio = validateAudio(value);
     const target = transcriptionTarget(store.preferences.dictation, store.runtimeProviders());
@@ -616,10 +693,24 @@ async function boot(): Promise<void> {
   await mkdir(root, { recursive: true, mode: 0o700 });
   store = new SettingsStore(join(root, 'settings'), codec());
   await store.load();
+  await store.ensureScratch(join(root, 'scratch'));
+  if (!store.workspace) await store.switchWorkspace(SCRATCH_WORKSPACE_ID);
+  updates = new Updates(status => emit({ type: 'update', status }));
+  updates.start(store.preferences.general.autoUpdate);
+  history = new HistoryIndex(join(root, 'history.json'), () => {
+    if (engine.status.state !== 'ready') return undefined;
+    const archived = new Set(store.preferences.archivedSessions);
+    return {
+      listAllSessions: async () => (await engine.listAllSessions()).filter((item) => !archived.has(item.id)),
+      getMessages: (sessionId: string) => engine.getMessages(sessionId),
+    };
+  });
+  await history.load();
   automation = new AutomationStore(join(root, 'automation.json'));
   await automation.load();
   engineRoot = join(root, 'engine');
   engine = new Engine(engineRoot, engineBinary(), emit, browserHooks());
+  engine.keepEngineConfig(await terminalEnabled());
   engine.setAutoCompact(store.preferences.context.autoCompact, store.preferences.context.compactThreshold);
   plugins = new PluginManager(join(engineRoot, 'plugins'));
   await plugins.cleanup();
@@ -641,13 +732,31 @@ async function boot(): Promise<void> {
   });
   prepareBrowserSession();
   scheduler = new Scheduler(automation, runScheduledJob, announceAutomation);
+  atlas = new AtlasRunner({
+    project: () => {
+      const active = store.workspace;
+      return active && active.id !== SCRATCH_WORKSPACE_ID ? { id: active.id, name: active.name, path: active.path } : undefined;
+    },
+    engine: () => needEngine(),
+    model: () => {
+      const model = store.preferences.defaultModel;
+      return { model, auto: !model, autoSettings: store.preferences.auto };
+    },
+    emit: (projectId, view) => emit({ type: 'atlas', workspaceId: projectId, view }),
+    sessionsChanged: () => emit({ type: 'sessions-changed' }),
+  });
   register();
   await createWindow();
   scheduler.start();
   await restart();
+  if (store.workspace) void history.refresh();
   try {
     await startControlServer({
-      root, version: app.getVersion(), emit,
+      root,
+      cliPath: join(app.getAppPath(), 'dist', 'relayctl.mjs'),
+      launcherPath: join(app.getAppPath(), 'dist', 'relay.mjs'),
+      engine: { binary: engineBinary(), root: engineRoot, access: store.preferences.defaultAccess },
+      version: app.getVersion(), emit,
       listTasks: async () => (await engine.listSessions()).map(item => ({ id: item.id, title: item.title, status: item.status })),
       listSkills: async () => (await engine.listSkills()).map(item => ({ id: item.id, name: item.name, description: item.description })),
       installSkill: async (url, sha256) => {
@@ -710,7 +819,10 @@ else {
     const forceQuit = setTimeout(() => app.exit(0), 6_000);
     void (async () => {
       try {
-        await (engine ? engine.stop() : Promise.resolve());
+        if (engine) {
+          engine.keepEngineConfig(await terminalEnabled());
+          await engine.stop();
+        }
       } catch (error) {
         console.warn('Quit: engine stop failed:', error instanceof Error ? error.message : error);
       } finally {

@@ -1,12 +1,18 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomBytes } from 'node:crypto';
-import { access, mkdir, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { AppEvent } from '../shared/contracts.js';
+import type { AccessLevel, AppEvent } from '../shared/contracts.js';
 
 export interface ControlOptions {
   /** Base directory for Relay's own state (userData/relay). */
   root: string;
+  /** Built relayctl bundle, copied next to the state so agents can call it. */
+  cliPath: string;
+  /** Built terminal launcher, copied next to the state so `relay` survives app updates. */
+  launcherPath: string;
+  /** Engine binary, state root, and default access the terminal launcher should reuse. */
+  engine: { binary: string; root: string; access: AccessLevel };
   version: string;
   emit: (event: AppEvent) => void;
   listTasks: () => Promise<Array<{ id: string; title: string; status: string }>>;
@@ -17,49 +23,6 @@ export interface ControlOptions {
   saveAutomation: (input: unknown) => Promise<{ jobs: unknown[]; runs: unknown[] }>;
   runAutomation: (id: string) => Promise<{ jobs: unknown[]; runs: unknown[] }>;
 }
-const CLI = `#!/usr/bin/env node
-// relayctl — command line access to the running Relay app.
-// Agents with shell access can drive Relay:
-//   node relayctl.mjs health
-//   node relayctl.mjs tasks
-//   node relayctl.mjs create-task '{"title":"Triage the flaky suite","prompt":"Fix the flaky test"}'
-//   node relayctl.mjs open-page '{"url":"https://example.com"}'
-//   node relayctl.mjs skills
-//   node relayctl.mjs install-skill '{"url":"https://github.com/owner/repo/tree/main/skills/foo"}'
-//   node relayctl.mjs automations
-//   node relayctl.mjs create-automation '{"name":"Daily triage","action":{"kind":"prompt","prompt":"Summarize failures","location":"local","output":"independent","access":"ask","model":"provider::model"},"schedule":{"kind":"daily","time":"09:00"},"timezone":"UTC","enabled":true}'
-//   node relayctl.mjs run-automation '{"id":"<automation id>"}'
-import { readFileSync } from 'node:fs';
-import http from 'node:http';
-import os from 'node:os';
-import { join } from 'node:path';
-const controlPath = process.env.RELAY_CONTROL || join(os.homedir(), 'Library', 'Application Support', 'relay-workspace', 'control.json');
-const control = JSON.parse(readFileSync(controlPath, 'utf8'));
-const [cmd, ...rest] = process.argv.slice(2);
-const arg = rest.length ? JSON.parse(rest.join(' ')) : undefined;
-const routes = {
-  health: ['GET', '/health'],
-  tasks: ['GET', '/tasks'],
-  skills: ['GET', '/skills'],
-  automations: ['GET', '/automations'],
-  'create-task': ['POST', '/task'],
-  'open-page': ['POST', '/open-page'],
-  'install-skill': ['POST', '/skills/install'],
-  'create-automation': ['POST', '/automations'],
-  'run-automation': ['POST', '/automations/run'],
-};
-const route = routes[cmd];
-if (!route) { console.error('Unknown command. Use: ' + Object.keys(routes).join(', ')); process.exit(1); }
-const [method, path] = route;
-const body = method === 'POST' ? JSON.stringify(arg ?? {}) : undefined;
-const request = http.request(
-  { host: '127.0.0.1', port: control.port, path, method, headers: { 'x-relay-token': control.token, ...(body ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) } : {}) } },
-  response => { let text = ''; response.setEncoding('utf8'); response.on('data', chunk => { text += chunk; }); response.on('end', () => { console.log(text); process.exit(response.statusCode >= 400 ? 1 : 0); }); },
-);
-request.on('error', error => { console.error(String(error)); process.exit(1); });
-request.write(body ?? '');
-request.end();
-`;
 
 function json(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -90,21 +53,20 @@ const SKILL = `---
 description: Drive the running Relay desktop app from the shell — open a page in its in-app browser, create or list tasks, install skills, and manage automations. Use when the user asks to use the Relay app, open something in Relay, or work with Relay tasks/skills/automations.
 ---
 # Relay control
-Relay runs a local control server. The CLI is written next to its state directory:
+Relay runs a local control server and ships relayctl. If relayctl is on PATH, call it directly; otherwise use the copy written next to Relay's state:
 
-    ls ~/Library/Application\\ Support/relay-workspace/relayctl.mjs
-
-Use it instead of any other tool when acting on the running Relay app:
-
+    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs --help
     node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs health
     node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs tasks
-    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs create-task '{"title":"Triage the flaky suite","prompt":"Fix the flaky test"}'
-    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs open-page '{"url":"https://example.com"}'
+    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs create-task --title "Triage the flaky suite" --prompt "Fix the flaky test"
+    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs open-page --url https://example.com
     node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs skills
-    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs install-skill '{"url":"https://github.com/owner/repo/tree/main/skills/foo"}'
+    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs install-skill --url https://github.com/owner/repo/tree/main/skills/foo
     node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs automations
     node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs create-automation '{"name":"Daily triage","action":{"kind":"prompt","prompt":"Summarize failures","location":"local","output":"independent","access":"ask","model":"provider::model"},"schedule":{"kind":"daily","time":"09:00"},"timezone":"UTC","enabled":true}'
-    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs run-automation '{"id":"<automation id>"}'
+    node ~/Library/Application\\ Support/relay-workspace/relayctl.mjs run-automation --id <automation id>
+
+JSON objects also work as positional arguments, and --json prints the raw response.
 
 Rules: only http/https pages can be opened; create-task starts a new Relay task; tasks created with a prompt start running immediately. install-skill installs immediately with no preview — only install a skill the user explicitly asked for. create-automation validates and schedules immediately. Never use this for changing Relay's configuration files — change settings in the app itself.
 `;
@@ -171,7 +133,20 @@ export async function startControlServer(options: ControlOptions): Promise<void>
   const parent = dirname(options.root);
   await writeFile(join(parent, 'control.json'), JSON.stringify({ port: address.port, token, pid: process.pid }), { mode: 0o600 });
   await mkdir(parent, { recursive: true, mode: 0o700 });
-  await writeFile(join(parent, 'relayctl.mjs'), CLI, { mode: 0o700 });
+  const cli = await readFile(options.cliPath, 'utf8').catch(() => undefined);
+  if (cli) await writeFile(join(parent, 'relayctl.mjs'), cli, { mode: 0o700 });
+  else console.warn(`relayctl bundle not found at ${options.cliPath}`);
+  const launcher = await readFile(options.launcherPath, 'utf8').catch(() => undefined);
+  if (launcher) await writeFile(join(parent, 'relay.mjs'), launcher, { mode: 0o700 });
+  else console.warn(`relay bundle not found at ${options.launcherPath}`);
+  await writeFile(join(parent, 'relay.json'), JSON.stringify({
+    version: options.version,
+    binary: options.engine.binary,
+    root: options.engine.root,
+    config: join(options.engine.root, 'opencode.json'),
+    access: options.engine.access,
+    pid: process.pid,
+  }, null, 2), { mode: 0o600 });
   // Teach agents how to reach the app. Best effort — never block boot.
   try {
     const skillsDir = join(process.env.HOME ?? process.cwd(), '.config', 'opencode', 'skills', 'relay-control');

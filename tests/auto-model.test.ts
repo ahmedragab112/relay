@@ -28,6 +28,22 @@ test('auto candidates prefer lowest cost, then smallest context', () => {
   assert.deepEqual(result.map((item) => item.id), ['free::small', 'free::large', 'paid::cheap', 'paid::big']);
 });
 
+test('auto candidates skip models hosted on the engine gateway by default', () => {
+  const result = autoModelCandidates([
+    model({ id: 'opencode::free', providerID: 'opencode', free: true, engineHosted: true, cost: 0 }),
+    model({ id: 'openrouter::paid', providerID: 'openrouter', free: false, cost: 1 }),
+  ]);
+  assert.deepEqual(result.map((item) => item.id), ['openrouter::paid']);
+});
+
+test('auto candidates include engine-hosted models only when opted in', () => {
+  const result = autoModelCandidates([
+    model({ id: 'opencode::free', providerID: 'opencode', free: true, engineHosted: true, cost: 0 }),
+    model({ id: 'openrouter::paid', providerID: 'openrouter', free: false, cost: 1 }),
+  ], { includeFree: true, includeEngineHosted: true, maxTokens: 4096, modelIds: [] });
+  assert.deepEqual(result.map((item) => item.id), ['opencode::free', 'openrouter::paid']);
+});
+
 test('auto candidates cap at six and pick the first variant', () => {
   const models = Array.from({ length: 10 }, (_, index) => model({
     id: `p::m${index}`,

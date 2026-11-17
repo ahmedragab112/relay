@@ -1,4 +1,5 @@
 import type { SessionSummary, Workspace } from '../shared/contracts';
+import { SCRATCH_WORKSPACE_ID } from '../shared/contracts';
 
 export interface TaskGroup {
   id: string;
@@ -28,20 +29,25 @@ export function groupTasks(sessions: SessionSummary[], workspaces: Workspace[], 
     groups.set(id, group);
     return group;
   };
+  // Tasks without a folder and tasks in the shared No folder space share one group.
   for (const session of latest(sessions)) {
     if (!session.directory) { (groups.get('none') ?? make('none', 'No folder')).sessions.push(session); continue; }
     const workspace = byPath.get(normalize(session.directory));
     if (!workspace) continue;
+    if (workspace.id === SCRATCH_WORKSPACE_ID) { (groups.get('none') ?? make('none', 'No folder')).sessions.push(session); continue; }
     (groups.get(workspace.id) ?? make(workspace.id, workspace.name, workspace.path)).sessions.push(session);
   }
+  const scratch = currentId === SCRATCH_WORKSPACE_ID;
+  const loose = groups.get('none');
+  if (loose) loose.current = scratch;
   const ordered: TaskGroup[] = [];
-  const current = currentId ? byId.get(currentId) : undefined;
+  const current = currentId && !scratch ? byId.get(currentId) : undefined;
   if (current) ordered.push(groups.get(current.id) ?? make(current.id, current.name, current.path));
-  ordered.push(...workspaces.filter((workspace) => workspace.id !== currentId)
+  else if (loose) ordered.push(loose);
+  ordered.push(...workspaces.filter((workspace) => workspace.id !== currentId && workspace.id !== SCRATCH_WORKSPACE_ID)
     .sort((left, right) => right.lastOpened - left.lastOpened)
     .flatMap((workspace) => groups.get(workspace.id) ?? []));
-  const loose = groups.get('none');
-  if (loose) ordered.push(loose);
+  if (loose && !ordered.includes(loose)) ordered.push(loose);
   for (const group of ordered) group.sessions.sort((left, right) => right.updatedAt - left.updatedAt);
   return ordered;
 }

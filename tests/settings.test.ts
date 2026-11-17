@@ -127,6 +127,50 @@ test('cloud providers require a key while local providers and legacy model IDs s
   assert.equal(legacy.preferences.modelVariant, '');
 });
 
+test('legacy settings stop defaulting to a model hosted on the engine gateway', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'settings.json'), JSON.stringify({
+    version: 1,
+    preferences: {
+      theme: 'dark', defaultModel: 'opencode::deepseek-v4.1-flash-free',
+      auto: { includeFree: true, maxTokens: 4096, modelIds: [] },
+    },
+    workspaces: [], providers: [{ id: 'openrouter', encryptedKey: 'v1:stored' }], mcp: [],
+  }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.defaultModel, '');
+  assert.equal(store.preferences.auto.includeEngineHosted, false);
+});
+
+test('an explicit engine-hosted default survives once the opt-in exists', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'settings.json'), JSON.stringify({
+    version: 1,
+    preferences: {
+      theme: 'dark', defaultModel: 'opencode::deepseek-v4.1-flash-free',
+      auto: { includeFree: true, includeEngineHosted: true, maxTokens: 4096, modelIds: [] },
+    },
+    workspaces: [], providers: [{ id: 'openrouter', encryptedKey: 'v1:stored' }], mcp: [],
+  }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.defaultModel, 'opencode::deepseek-v4.1-flash-free');
+  assert.equal(store.preferences.auto.includeEngineHosted, true);
+});
+
+test('auto settings can opt into engine-hosted models', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.auto.includeEngineHosted, false);
+  await store.savePreferences({ auto: { includeEngineHosted: true } });
+  assert.equal(store.preferences.auto.includeEngineHosted, true);
+});
+
 test('dictation preferences persist and reject invalid choices', async t => {
   const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
   t.after(() => rm(root, { recursive: true, force: true }));

@@ -1,5 +1,6 @@
 import './styles.css';
 import type { AppEvent, AppState, EngineStatus, SearchMode, SessionSummary } from '../shared/contracts';
+import { SCRATCH_WORKSPACE_ID } from '../shared/contracts';
 import { byId, button, el, notify, report, run } from './dom';
 import { applyLanguage } from './i18n';
 import { confirmAction, dialog } from './dialog';
@@ -17,9 +18,11 @@ import { playChime } from './chime';
 import { TerminalView } from './terminal';
 import { showSettings, closeSettings } from './settings';
 import { showAutomation, closeAutomation } from './automation';
+import { AtlasPanel } from './atlas-page';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
-import { showSearch } from './search';
+import { showSearch, showTaskSearch } from './search';
+import { ScopeChip } from './scope-chip';
 import { ReviewCard } from './review';
 import { UsageMeter } from './usage';
 import { homeGame } from './home-game';
@@ -72,13 +75,15 @@ const composer = new Composer(() => {
   return Boolean(provider && (provider.hasKey || providerPreset(preferences.provider)?.keyless));
 });
 const sessions = new Sessions(selectSession, openFolder, () => reviewReload.request(), id => requests.pendingFor(id) > 0);
+const scope = new ScopeChip(id => switchScope(id), () => switchScope('choose'));
 const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
 const tools = new ToolsPage({ openTask: openSession, openFolder: id => { void openFolder(id); } });
+const atlas = new AtlasPanel((path, line) => { closeOverlayPages(); showInspector(); inspector.openPath(path, line); });
 const queue = new QueueView(message => composer.restoreQueued(message));
 const review = new ReviewCard(() => { showInspector(); inspector.reviewSession(); }, () => inspector.follow('edit'));
 const usage = new UsageMeter(() => { messagesReload.request(); changesReload.request(); reviewReload.request(); });
-const messagesReload = coalescedReload(() => chat.reload(), error => report('Conversation refresh failed', error), 90);
+const messagesReload = coalescedReload(async () => { await chat.reload(); syncScope(); }, error => report('Conversation refresh failed', error), 90);
 const queueReload = coalescedReload(() => queue.reload(), error => report('Queued messages refresh failed', error), 120);
 const sessionsReload = coalescedReload(() => sessions.reload(), error => report('Task refresh failed', error), 400);
 const sessionsRefresh = coalescedReload(() => sessions.reload(), error => report('Task refresh failed', error), 1_500);
@@ -97,6 +102,14 @@ function appearance(): void {
   editorTheme(light); terminal.theme();
 }
 
+function syncScope(): void {
+  scope.sync({
+    workspace: state?.workspace,
+    workspaces: state?.workspaces ?? [],
+    locked: Boolean(selectedId) && (chat.count() > 0 || selectedSession?.status === 'running'),
+  });
+}
+
 function engine(status: EngineStatus): void {
   byId('engine-dot').className = `status-dot ${status.state}`;
   byId('engine-status').textContent = `Engine ${status.state}${status.version ? ` · ${status.version}` : ''} — ${status.detail}`;
@@ -104,8 +117,9 @@ function engine(status: EngineStatus): void {
   byId('retry-state').hidden = status.state !== 'error' && status.state !== 'stopped';
   inspector.setReady(status.state === 'ready');
   composer.setEngine(status);
-  byId<HTMLButtonElement>('new-task').disabled = changingWorkspace || !state?.workspace || status.state !== 'ready';
+  byId<HTMLButtonElement>('new-task').disabled = changingWorkspace || status.state !== 'ready';
   byId<HTMLButtonElement>('tools-button').disabled = !state?.workspace || status.state !== 'ready';
+  byId<HTMLButtonElement>('atlas-button').disabled = !state?.workspace || state.workspace.id === SCRATCH_WORKSPACE_ID || status.state !== 'ready';
   attention.setEnabled(Boolean(state?.workspace) && status.state === 'ready');
 }
 
@@ -129,7 +143,8 @@ function apply(next: AppState): void {
   const previousWorkspace = state?.workspace?.id;
   state = next;
   applyPlatform(next);
-  byId('workspace-button').textContent = next.workspace?.name ?? 'Open project';
+  const scratch = next.workspace?.id === SCRATCH_WORKSPACE_ID;
+  byId('workspace-button').textContent = scratch ? 'No folder' : next.workspace?.name ?? 'Open project';
   byId('workspace-button').title = next.workspace?.path ?? 'Open or switch local project';
   byId('workspace-path').textContent = next.workspace?.path ?? 'No project open';
   byId('app-version').textContent = `Relay ${next.version} · ${next.arch}`;
@@ -149,6 +164,7 @@ function apply(next: AppState): void {
     composer.reset(); composer.setModels([], next.preferences.defaultModel);
     queue.select('');
     requests.clear(); inspector.setWorkspace(next.workspace?.id ?? '');
+    atlas.setWorkspace(next.workspace && next.workspace.id !== SCRATCH_WORKSPACE_ID ? next.workspace.id : undefined);
     usage.setSession(''); review.setSession('');
     sessions.reset(!!next.workspace, next.workspaces, next.workspace?.id);
     if (next.workspace && next.engine.state === 'ready') {
@@ -157,13 +173,14 @@ function apply(next: AppState): void {
       void refreshSkills(); void refreshCommands();
     }
   }
+  syncScope();
 }
 
 function homeExtras(): { suggestions?: Array<{ label: string; action: () => void }>; game?: HTMLElement } {
   if (!state?.workspace) return {};
   const preferences = state.preferences.general;
   const extras: { suggestions?: Array<{ label: string; action: () => void }>; game?: HTMLElement } = {};
-  if (preferences.promptSuggestions) {
+  if (preferences.promptSuggestions && state.workspace.id !== SCRATCH_WORKSPACE_ID) {
     extras.suggestions = [
       { label: 'Explain this project', action: () => composer.suggest('Explain how this project is structured and how its main parts fit together.') },
       { label: 'Review recent changes', action: () => composer.suggest('Review the current uncommitted changes and flag anything risky.') },
@@ -195,11 +212,16 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
     chat.empty('Build with your own models.', 'Open a local project, attach a provider (most free tiers work), and your tasks run against the local OpenCode engine on this Mac.', [
       { label: 'Open project', action: openProject }, { label: 'Configure model', action: settings },
     ]);
+  } else if (state.workspace.id === SCRATCH_WORKSPACE_ID) {
+    chat.empty('What should we work on?', 'No folder needed — describe the goal and Relay works in a shared space. Attach a project anytime from the folder chip below.', [
+      { label: 'New task', action: newTask }, { label: 'Configure model', action: settings },
+    ], homeExtras());
   } else {
     chat.empty('What should we build?', 'Describe the goal. Relay inspects your project, makes the changes, and verifies them before declaring done.', [
       { label: 'New task', action: newTask }, { label: 'Configure model', action: settings },
     ], homeExtras());
   }
+  syncScope();
 }
 
 async function refreshModels(): Promise<void> {
@@ -236,7 +258,7 @@ async function refreshCommands(): Promise<void> {
 }
 
 // Only one overlay page may be visible at a time (settings/automation/toolkit/attention stack).
-const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); tools.close(); attention.close(); };
+const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.close(); tools.close(); attention.close(); };
 
 function settings(): void {
   if (!state) { notify('App state is not available yet. Use Refresh to retry.', true); return; }
@@ -245,9 +267,11 @@ function settings(): void {
 }
 
 async function newTask(): Promise<void> {
-  if (!state?.workspace) { await openProject(); return; }
-  if (state.engine.state !== 'ready') { notify(`Engine ${state.engine.state}: ${state.engine.detail}. Wait for ready or check settings.`, true); return; }
   if (changingWorkspace) return;
+  if (!state?.workspace) {
+    if (!await changeWorkspace(() => window.relay.switchWorkspace(SCRATCH_WORKSPACE_ID))) return;
+  }
+  if (state?.engine.state !== 'ready') { notify(`Engine ${state?.engine.state ?? 'stopped'}: ${state?.engine.detail ?? 'not ready'}. Wait for ready or check settings.`, true); return; }
   const control = byId<HTMLButtonElement>('new-task'); control.disabled = true;
   try { await sessions.create(); composer.focus(); }
   finally { if (state) engine(state.engine); }
@@ -289,6 +313,31 @@ async function openFolder(workspaceId: string): Promise<boolean> {
 
 async function openProject(): Promise<void> { await changeWorkspace(() => window.relay.openWorkspace()); }
 
+/** Moves the folder of a task that was just started; an empty task follows the new folder. */
+async function switchScope(target: string): Promise<void> {
+  if (changingWorkspace) return;
+  if (target !== 'choose' && state?.workspace?.id === target) return;
+  const moving = selectedSession && selectedSession.status !== 'running' && chat.count() === 0 ? selectedSession : undefined;
+  const before = state?.workspace?.id;
+  if (moving) composer.preserve();
+  const switched = await changeWorkspace(target === 'choose' ? () => window.relay.openWorkspace() : () => window.relay.switchWorkspace(target));
+  if (!switched) { if (moving) composer.cancelPreserved(); return; }
+  const next = state?.workspace;
+  if (!moving || !next) return;
+  if (next.id === before) { composer.cancelPreserved(); return; }
+  try {
+    await window.relay.moveSession(moving.id, next.id);
+    await sessions.resume(moving.id);
+  } catch (error) {
+    try {
+      await window.relay.deleteSession(moving.id);
+      await sessions.create(next.id);
+      if (sessions.active) composer.carry(moving.id);
+    } catch (fallback) { report('The task could not move to that folder', error instanceof Error ? error : fallback); return; }
+  }
+  composer.focus();
+}
+
 function workspacePicker(): void {
   if (!state?.workspaces.length) { void openProject().catch(error => report('Could not open project', error)); return; }
   const modal = dialog('Local projects');
@@ -301,10 +350,17 @@ function workspacePicker(): void {
       catch (error) { modal.fail(error); }
       finally { modal.busy(false); }
     }, 'palette-option');
-    const text = el('span'); text.append(el('span', '', workspace.name), el('div', 'project-path', workspace.path));
+    const text = el('span'); text.append(el('span', '', workspace.id === SCRATCH_WORKSPACE_ID ? 'No folder' : workspace.name),
+      el('div', 'project-path', workspace.id === SCRATCH_WORKSPACE_ID ? 'Shared space for tasks without a project' : workspace.path));
     control.append(text);
     if (workspace.id === state.workspace?.id) control.append(el('span', 'pill', 'Current'));
     modal.add(control);
+  }
+  if (state.workspaces.some(workspace => workspace.id === SCRATCH_WORKSPACE_ID)) {
+    modal.add(button('Show No folder on disk', async () => {
+      try { await window.relay.revealWorkspace(SCRATCH_WORKSPACE_ID); modal.root.close(); }
+      catch (error) { modal.fail(error); }
+    }, 'palette-option'));
   }
 }
 
@@ -329,6 +385,25 @@ function search(mode: SearchMode): void {
 }
 
 function openSession(id: string): void { sessions.open(id); }
+
+function searchTasks(): void {
+  showTaskSearch(hit => {
+    if (!sessions.items.some(item => item.id === hit.sessionId)) void sessions.reload().then(() => sessions.open(hit.sessionId));
+    else sessions.open(hit.sessionId);
+    if (hit.messageId) revealMessage(hit.sessionId, hit.messageId);
+  });
+}
+
+// The transcript reloads after the switch; keep asking until the reply is on screen.
+function revealMessage(sessionId: string, messageId: string): void {
+  if (selectedId === sessionId && chat.locate(messageId)) return;
+  let attempts = 0;
+  const timer = window.setInterval(() => {
+    attempts++;
+    if (selectedId === sessionId && chat.locate(messageId)) { window.clearInterval(timer); return; }
+    if (attempts >= 80) window.clearInterval(timer);
+  }, 100);
+}
 
 function openTools(mode: ToolsMode): void {
   closeOverlayPages();
@@ -362,11 +437,13 @@ function palette(): void {
       { label: 'Template: Explain this repo', action: () => void composer.sendText('Explain how this repository is structured: the entry points, data flow, and the two or three files that matter most. Keep it short.') },
       { label: 'Go to file…', shortcut: key('Mod+P'), action: () => search('files') },
       { label: 'Search in files…', shortcut: key('Mod+F'), action: () => search('content') },
+      { label: 'Search tasks & messages…', shortcut: key('Mod+Shift+F'), action: searchTasks },
       { label: 'Open in-app browser', action: () => { showInspector(); inspector.openBrowser(); } },
       { label: 'Open terminal', action: () => terminal.open() },
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
       { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
       { label: 'Scheduled automation', action: openAutomation },
+      { label: 'Atlas — project knowledge', action: () => { closeOverlayPages(); atlas.open(); } },
       { label: 'Attention — agent requests', action: () => { closeOverlayPages(); attention.show(); } },
       { label: 'Usage & context', action: () => usage.open() },
       { label: 'Compact conversation', action: () => usage.compactNow() },
@@ -429,6 +506,7 @@ function event(event: AppEvent): void {
   } else if (event.type === 'usage') usage.apply(event.sessionId, event.usage);
   else if (event.type === 'open-session') { closeOverlayPages(); sessions.open(event.sessionId); }
   else if (event.type === 'sessions-changed') sessionsReload.request();
+  else if (event.type === 'atlas') { if (event.workspaceId === state?.workspace?.id) atlas.consume(event.view); }
   else if (event.type === 'skills-changed') { void refreshSkills(); if (tools.isOpen) void tools.reload(); }
   else if (event.type === 'plugins-changed' && tools.isOpen) void tools.reload();
   else if (event.type === 'commands-changed') void refreshCommands();
@@ -475,6 +553,7 @@ bind('search-button', () => search('files'));
 bind('settings-button', settings);
 bind('configure-model', settings);
 bind('automation-button', openAutomation);
+bind('atlas-button', () => { closeOverlayPages(); atlas.open(); });
 bind('tools-button', () => openTools('skills'));
 bind('palette-button', palette);
 bind('terminal-button', () => terminal.open());
@@ -506,6 +585,7 @@ wirePlusMenu(byId<HTMLButtonElement>('attach-file'), byId('plus-menu'), () => [
   { label: 'Add skill', hint: '✦', run: () => composer.pickSkills() },
   { label: 'Tools & agents', hint: '⛭', run: () => composer.pickAgents() },
   { label: 'Task context', hint: '↩', run: () => composer.pickContext() },
+  { label: 'Atlas knowledge', hint: '/knowledge', run: () => composer.pickKnowledge() },
   { label: 'Plan only', hint: '◇', run: () => composer.togglePlanOnly() },
   { label: 'Run a command', hint: '/', run: () => composer.pickCommands() },
   { label: 'Open terminal', hint: '>_', run: () => terminal.open() },
@@ -540,7 +620,7 @@ function keydown(event: KeyboardEvent): void {
   if (key === 'k') palette();
   else if (key === 'n') void newTask().catch(error => report('Could not create task', error));
   else if (key === 's') void inspector.editor.save();
-  else if (key === 'f') search('content');
+  else if (key === 'f') { if (event.shiftKey) searchTasks(); else search('content'); }
   else if (key === 'p') search('files');
   else if (key === 'b') toggleSidebar();
   else settings();

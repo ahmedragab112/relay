@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile, rename, realpath, stat } from 'node:fs/promises';
 import { basename, isAbsolute, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
+import { SCRATCH_WORKSPACE_ID } from '../shared/contracts.js';
 import type { AutoSettings, Accent, ContextSettings, GeneralSettings, McpServer, MessageReaction, PluginRecord, Preferences, PreferencesPatch, ProviderInput, ProviderSummary, Workspace } from '../shared/contracts.js';
 import { CONFIGURABLE_PROVIDERS, isConfigurableProviderID, providerPreset } from '../shared/providers.js';
 import { text, validateEndpoint } from './security.js';
@@ -39,13 +40,14 @@ export const generalDefaults: GeneralSettings = {
   turnNotifications: true,
   turnSound: true,
   requestNotifications: true,
+  autoUpdate: true,
   language: 'en',
   layout: 'tabs',
   accent: 'blue',
 };
 
 export const contextDefaults: ContextSettings = { autoCompact: false, compactThreshold: 80, shareProject: true };
-export const autoDefaults: AutoSettings = { includeFree: true, maxTokens: 4096, modelIds: [] };
+export const autoDefaults: AutoSettings = { includeFree: true, includeEngineHosted: false, maxTokens: 4096, modelIds: [] };
 
 const flag = (value: unknown, fallback: boolean): boolean => typeof value === 'boolean' ? value : fallback;
 
@@ -100,6 +102,7 @@ function sanitizeGeneral(value: unknown): GeneralSettings {
     turnNotifications: flag(raw.turnNotifications, generalDefaults.turnNotifications),
     turnSound: flag(raw.turnSound, generalDefaults.turnSound),
     requestNotifications: flag(raw.requestNotifications, generalDefaults.requestNotifications),
+    autoUpdate: flag(raw.autoUpdate, generalDefaults.autoUpdate),
     language: raw.language === 'ar' ? 'ar' : 'en',
     layout: raw.layout === 'inbox' || raw.layout === 'focus' ? raw.layout : 'tabs',
     accent: ['emerald', 'amber', 'rose', 'violet', 'cyan'].includes(raw.accent as string) ? raw.accent as Accent : 'blue',
@@ -121,7 +124,7 @@ function sanitizeAuto(value: unknown): AutoSettings {
   const raw = (value && typeof value === 'object' ? value : {}) as Partial<AutoSettings>;
   const maxTokens = typeof raw.maxTokens === 'number' && Number.isFinite(raw.maxTokens) && raw.maxTokens > 0 ? Math.min(256000, Math.round(raw.maxTokens)) : autoDefaults.maxTokens;
   const modelIds = Array.isArray(raw.modelIds) ? raw.modelIds.filter((item): item is string => typeof item === 'string').slice(0, 20) : [];
-  return { includeFree: flag(raw.includeFree, autoDefaults.includeFree), maxTokens, modelIds };
+  return { includeFree: flag(raw.includeFree, autoDefaults.includeFree), includeEngineHosted: flag(raw.includeEngineHosted, autoDefaults.includeEngineHosted), maxTokens, modelIds };
 }
 
 function sanitizeArchived(value: unknown): string[] {
@@ -202,7 +205,11 @@ function sanitizeReactions(value: unknown): StoredReaction[] {
 function sanitizeSettings(data: StoredSettings): StoredSettings {
   const rawPreferences = (data.preferences ?? {}) as Partial<Preferences>;
   const theme: Preferences['theme'] = ['dark', 'light', 'system'].includes(rawPreferences.theme as string) ? rawPreferences.theme as Preferences['theme'] : 'dark';
-  const defaultModel = typeof rawPreferences.defaultModel === 'string' ? rawPreferences.defaultModel.slice(0, 512) : '';
+  const rawAuto = (rawPreferences.auto && typeof rawPreferences.auto === 'object' ? rawPreferences.auto : {}) as Partial<AutoSettings>;
+  // Before the OpenCode opt-in existed, a saved engine-hosted model made every default
+  // turn spend OpenCode's own quota. Drop that choice once; a later explicit pick keeps it.
+  const legacyHostedDefault = rawAuto.includeEngineHosted === undefined && typeof rawPreferences.defaultModel === 'string' && rawPreferences.defaultModel.startsWith('opencode::');
+  const defaultModel = !legacyHostedDefault && typeof rawPreferences.defaultModel === 'string' ? rawPreferences.defaultModel.slice(0, 512) : '';
   const defaultAccess: AccessLevel = accessLevels.includes(rawPreferences.defaultAccess as AccessLevel) ? rawPreferences.defaultAccess as AccessLevel : 'ask';
   const modelVariant = typeof rawPreferences.modelVariant === 'string' ? rawPreferences.modelVariant.slice(0, 64) : '';
   const rawDictation = (rawPreferences.dictation ?? {}) as Partial<DictationSettings>;
@@ -345,7 +352,9 @@ export class SettingsStore {
     if (!(await stat(canonical)).isDirectory()) throw new Error('Choose a project folder.');
     const id = createHash('sha256').update(canonical).digest('hex').slice(0, 20);
     const workspace: Workspace = { id, path: canonical, name: basename(canonical), lastOpened: Date.now() };
-    this.data.workspaces = [workspace, ...this.data.workspaces.filter(item => item.id !== id)].slice(0, 30);
+    const scratch = this.data.workspaces.find((item) => item.id === SCRATCH_WORKSPACE_ID);
+    const rest = [workspace, ...this.data.workspaces.filter((item) => item.id !== id && item.id !== SCRATCH_WORKSPACE_ID)];
+    this.data.workspaces = [...rest.slice(0, scratch ? 29 : 30), ...(scratch ? [scratch] : [])];
     this.data.preferences.activeWorkspaceId = id;
     await this.save();
     return workspace;
@@ -354,7 +363,23 @@ export class SettingsStore {
   async switchWorkspace(id: string): Promise<Workspace> {
     const workspace = this.data.workspaces.find(item => item.id === id);
     if (!workspace) throw new Error('Open this workspace through the folder picker first.');
-    return this.addWorkspace(workspace.path);
+    if (workspace.id !== SCRATCH_WORKSPACE_ID) return this.addWorkspace(workspace.path);
+    workspace.lastOpened = Date.now();
+    this.data.preferences.activeWorkspaceId = SCRATCH_WORKSPACE_ID;
+    await this.save();
+    return structuredClone(workspace);
+  }
+
+  /** Keeps the built-in No folder space available without opening it. */
+  async ensureScratch(path: string): Promise<Workspace> {
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const canonical = await realpath(path);
+    const current = this.data.workspaces.find((item) => item.id === SCRATCH_WORKSPACE_ID);
+    const scratch: Workspace = { id: SCRATCH_WORKSPACE_ID, path: canonical, name: 'No folder', lastOpened: current?.lastOpened ?? 0 };
+    if (current && current.path === scratch.path && current.name === scratch.name) return structuredClone(scratch);
+    this.data.workspaces = [...this.data.workspaces.filter((item) => item.id !== SCRATCH_WORKSPACE_ID), scratch].slice(-30);
+    await this.save();
+    return structuredClone(scratch);
   }
 
   async savePreferences(values: PreferencesPatch): Promise<void> {
@@ -433,6 +458,10 @@ export class SettingsStore {
     if (patch.includeFree !== undefined) {
       if (typeof patch.includeFree !== 'boolean') throw new Error('Include free must be on or off.');
       next.includeFree = patch.includeFree;
+    }
+    if (patch.includeEngineHosted !== undefined) {
+      if (typeof patch.includeEngineHosted !== 'boolean') throw new Error('Include OpenCode models must be on or off.');
+      next.includeEngineHosted = patch.includeEngineHosted;
     }
     if (patch.maxTokens !== undefined) {
       if (typeof patch.maxTokens !== 'number' || !Number.isFinite(patch.maxTokens) || patch.maxTokens <= 0) throw new Error('Max tokens must be a positive number.');
