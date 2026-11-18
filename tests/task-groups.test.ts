@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupTasks } from '../src/renderer/task-groups.js';
+import { groupTasks, toggleCollapsed } from '../src/renderer/task-groups.js';
 import type { SessionSummary, Workspace } from '../src/shared/contracts.js';
 
 const relays: Workspace = { id: 'relay', name: 'relay', path: '/projects/relay', lastOpened: 200 };
@@ -58,4 +58,11 @@ test('orders past folders by recency of use', () => {
   ], [relays, teacher, recent], 'relay');
 
   assert.deepEqual(groups.map((group) => group.name), ['relay', 'recent', 'teacher']);
+});
+
+test('the workspaces toggle collapses every group, then opens every group', () => {
+  const open: ReadonlySet<string> = new Set();
+  const collapsed = toggleCollapsed(['relay', 'teacher'], open);
+  assert.deepEqual([...collapsed], ['relay', 'teacher'], 'nothing collapsed yet, so collapse all');
+  assert.deepEqual([...toggleCollapsed(['relay', 'teacher'], collapsed)], [], 'something is collapsed, so open all');
 });

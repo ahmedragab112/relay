@@ -4,10 +4,11 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/p
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  ATLAS_CARDS_FILE, ATLAS_PLAN_FILE, ATLAS_ROOT, atlasPrompt, normalizeAtlasPages, parseAtlasCards, parseAtlasPlan,
-  type AtlasCard, type AtlasCards, type AtlasLanguage, type AtlasManifest, type AtlasPage, type AtlasStatus, type AtlasView,
+  ATLAS_CARDS_FILE, ATLAS_PLAN_FILE, ATLAS_ROOT, atlasPrompt, atlasTaskContext, normalizeAtlasPages, parseAtlasCards, parseAtlasPlan,
+  type AtlasCard, type AtlasCards, type AtlasLanguage, type AtlasManifest, type AtlasPage, type AtlasSource, type AtlasStatus, type AtlasView,
 } from '../shared/atlas.js';
-import type { AutoSettings, SendMessageInput } from '../shared/contracts.js';
+import type { AutoSettings, ChatMessage, SendMessageInput } from '../shared/contracts.js';
+import { atlasSessionTitle } from './session-visibility.js';
 
 const run = promisify(execFile);
 const PLAN_BYTES = 2 * 1024 * 1024;
@@ -24,6 +25,7 @@ export interface AtlasEngine {
   sendMessage(input: SendMessageInput): Promise<void>;
   waitForIdle(sessionId: string): Promise<void>;
   abortSession(sessionId: string): Promise<void>;
+  getMessages(sessionId: string): Promise<ChatMessage[]>;
 }
 
 export interface AtlasDeps {
@@ -32,6 +34,8 @@ export interface AtlasDeps {
   model(): { model: string; auto: boolean; autoSettings?: AutoSettings };
   emit(projectId: string, view: AtlasView): void;
   sessionsChanged(): void;
+  /** Atlas runs are not chats; every task list skips their sessions. */
+  hidden(sessionId: string): void;
 }
 
 function atlasDir(project: AtlasProject, language: AtlasLanguage): string {
@@ -72,8 +76,17 @@ function readManifest(text: string, language: AtlasLanguage): AtlasManifest | un
     project: typeof value.project === 'string' ? value.project : '',
     generatedAt: typeof value.generatedAt === 'number' ? value.generatedAt : 0,
     ...(typeof value.baseline === 'string' && value.baseline ? { baseline: value.baseline } : {}),
+    ...(readSource(value.source) ?? {}),
     pages,
   };
+}
+
+function readSource(value: unknown): { source: AtlasSource } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const entry = value as { kind?: unknown; title?: unknown };
+  if (entry.kind !== 'project' && entry.kind !== 'task') return undefined;
+  const title = typeof entry.title === 'string' ? entry.title.trim().slice(0, 200) : '';
+  return { source: { kind: entry.kind, ...(title ? { title } : {}) } };
 }
 
 interface InternalRun { status: AtlasStatus; sessionId?: string; canceled: boolean; done: boolean }
@@ -258,6 +271,7 @@ export class AtlasRunner {
       version: 1, language, project: project.name,
       generatedAt: previous?.generatedAt ?? Date.now(),
       ...(baseline ? { baseline } : {}),
+      ...(previous?.source ? { source: previous.source } : {}),
       pages: ordered,
     });
     this.deps.sessionsChanged();
@@ -294,7 +308,7 @@ export class AtlasRunner {
     return result;
   }
 
-  async generate(language: AtlasLanguage): Promise<AtlasView> {
+  async generate(language: AtlasLanguage, sessionId?: string, sourceTitle?: string): Promise<AtlasView> {
     const project = this.requireProject();
     const key = this.key(project, language);
     if (this.active(project, language)) throw new Error('Atlas is already being written for this language.');
@@ -308,8 +322,9 @@ export class AtlasRunner {
       const plan = await this.readPlan(project);
       await mkdir(dir, { recursive: true });
       await rm(join(dir, 'plan.json'), { force: true });
-      const session = await engine.createSession(`Atlas · ${project.name}`, project.path);
+      const session = await engine.createSession(atlasSessionTitle(project.name), project.path);
       run.sessionId = session.id;
+      this.deps.hidden(session.id);
       const snapshot = await this.snapshotPages(project, language);
       // Pages a person owns (hand-added or edited since generation) are restored after the run.
       const protect = (before?.pages ?? []).filter((page) => {
@@ -320,10 +335,15 @@ export class AtlasRunner {
       const total = plan.plan.documents.length || before?.pages.length || 0;
       await this.publish(project, language, { state: 'planning', detail: 'Reading the project' });
       const choice = this.deps.model();
-      const prompt = atlasPrompt({ projectName: project.name, language, plan: plan.plan, existing: before?.pages, protect, changed });
+      const transcript = sessionId ? await engine.getMessages(sessionId).catch(() => [] as ChatMessage[]) : [];
+      const taskContext = atlasTaskContext(transcript);
+      const context = taskContext
+        ? `${taskContext}\n\nRelay added this transcript as background: do not echo it into pages, and ground every page in the code.`
+        : undefined;
+      const prompt = atlasPrompt({ projectName: project.name, language, plan: plan.plan, existing: before?.pages, protect, changed, ...(context ? { context } : {}) });
       timer = setInterval(() => { void this.countPages(project, language, run, total); }, 2000);
       await engine.sendMessage({
-        sessionId: session.id, text: prompt, model: choice.model, variant: '', access: 'auto',
+        sessionId: session.id, text: prompt, model: choice.model, variant: '', access: 'full',
         files: [], skills: [], ...(choice.auto ? { auto: true, autoSettings: choice.autoSettings } : {}),
       });
       await engine.waitForIdle(session.id);
@@ -335,7 +355,10 @@ export class AtlasRunner {
         if (held) await writeFile(this.pagePath(project, language, page.slug), held.text, { mode: 0o600 }).catch(() => undefined);
       }
       const written = await this.collect(project, language, run, total);
-      const status = await this.finish(project, language, written.pages, written.kept, written.planned, before, snapshot, changed.length > 0);
+      const source: AtlasSource = sessionId
+        ? { kind: 'task', ...(sourceTitle?.trim() ? { title: sourceTitle.trim().slice(0, 200) } : {}) }
+        : { kind: 'project' };
+      const status = await this.finish(project, language, written.pages, written.kept, written.planned, source, before, snapshot, changed.length > 0);
       run.status = status;
       return await this.viewOf(project, language, status);
     } catch (error) {
@@ -398,7 +421,7 @@ export class AtlasRunner {
     return (await this.readManifestFile(project, language))?.pages ?? [];
   }
 
-  private async finish(project: AtlasProject, language: AtlasLanguage, pages: AtlasPage[], kept: string[], planned: number, before?: AtlasManifest, snapshot?: Map<string, { hash: string; text: string }>, incremental = false): Promise<AtlasStatus> {
+  private async finish(project: AtlasProject, language: AtlasLanguage, pages: AtlasPage[], kept: string[], planned: number, source: AtlasSource | undefined, before?: AtlasManifest, snapshot?: Map<string, { hash: string; text: string }>, incremental = false): Promise<AtlasStatus> {
     const dir = atlasDir(project, language);
     const previous = new Map((before?.pages ?? []).map((page) => [page.slug, page]));
     const keep = new Set(kept);
@@ -444,7 +467,7 @@ export class AtlasRunner {
     const baseline = await gitHead(project.path);
     const manifest: AtlasManifest = {
       version: 1, language, project: project.name, generatedAt: Date.now(),
-      ...(baseline ? { baseline } : {}), pages: normalizeAtlasPages(result),
+      ...(baseline ? { baseline } : {}), ...(source ? { source } : {}), pages: normalizeAtlasPages(result),
     };
     await this.writeManifest(project, language, manifest);
     this.deps.sessionsChanged();

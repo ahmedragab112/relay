@@ -1,19 +1,77 @@
-import type { AccessLevel, AgentOption, AutoSettings, CommandOption, ContextBlock, EngineStatus, McpServer, ModelOption, PluginView, Preferences, QueuedMessage, SessionSummary, SkillOption } from '../shared/contracts';
+import type { AccessLevel, AgentOption, AutoSettings, CommandOption, ContextBlock, EngineStatus, McpServer, ModelOption, PluginView, Preferences, QueuedMessage, SessionSummary, SkillOption, StagedAttachment } from '../shared/contracts';
 import { byId, button, el, errorText, notify, report } from './dom';
+import { fileIconElement } from './file-icons';
 import { dialog } from './dialog';
 import { resolveInitialModel } from './state';
 import { groupModels, resolveVariant, variantLabel } from './model-menu';
 import { resetLabel } from '../shared/limits';
 import { Dictation } from './dictation';
-import { filterMentionables, parseMentionToken, type MentionSource } from './mention';
+import { atlasMention, filterMentionables, parseMentionToken, type MentionSource } from './mention';
 import { ATLAS_LANGUAGE_KEY, ATLAS_ROOT, isAtlasLanguage, type AtlasCard, type AtlasLanguage, type AtlasPage } from '../shared/atlas';
 
 const KNOWLEDGE_COMMAND: CommandOption = { name: 'knowledge', description: 'Attach Atlas pages or module cards to this message' };
 const atlasLocation = (language: AtlasLanguage, slug: string): string => `${ATLAS_ROOT}/${language}/${slug}.md`;
 
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+// Long pasted text becomes a file attachment so the agent receives it whole.
+const PASTE_ATTACH_CHARS = 2000;
+
+export interface ComposerAttachment {
+  path: string;
+  name: string;
+  detail: string;
+}
+
 interface Draft {
-  text: string; files: string[]; access: AccessLevel; variant: string; skills: string[]; command: string;
+  text: string; files: ComposerAttachment[]; access: AccessLevel; variant: string; skills: string[]; command: string;
   planOnly: boolean; agents: string[]; context: ContextBlock[];
+}
+
+const formatBytes = (size: number): string => {
+  if (size < 1024) return `${size} B`;
+  const kb = size / 1024;
+  return kb >= 1024 ? `${(kb / 1024).toFixed(1)} MB` : `${kb.toFixed(kb >= 10 ? 0 : 1)} KB`;
+};
+
+const extensionLabel = (name: string): string => {
+  const dot = name.lastIndexOf('.');
+  return (dot > 0 ? name.slice(dot + 1).toUpperCase() : '').slice(0, 5) || 'File';
+};
+
+const previewLine = (text: string): string => {
+  const line = text.split('\n').find(item => item.trim()) ?? '';
+  return line.replace(/\s+/g, ' ').trim().slice(0, 72);
+};
+
+const attachmentFromPath = (path: string): ComposerAttachment => ({
+  path, name: path.split('/').pop() || path, detail: 'Workspace file',
+});
+
+const mergeByPath = (items: ComposerAttachment[]): ComposerAttachment[] => {
+  const seen = new Set<string>();
+  return items.filter(item => (seen.has(item.path) ? false : (seen.add(item.path), true)));
+};
+
+function pathFromFileURL(value: string): string {
+  try {
+    const url = new URL(value.trim());
+    if (url.protocol !== 'file:') return '';
+    const decoded = decodeURIComponent(url.pathname);
+    return /^\/[A-Za-z]:\//.test(decoded) ? decoded.slice(1) : decoded;
+  } catch { return ''; }
+}
+
+function fileData(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result ?? '');
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('The file could not be read.'));
+    reader.readAsDataURL(file);
+  });
 }
 
 const accessLevels: AccessLevel[] = ['read', 'ask', 'auto', 'full'];
@@ -37,7 +95,7 @@ export class Composer {
   private stopping = new Set<string>();
   private drafts = new Map<string, Draft>();
   private preserved?: Draft;
-  private files: string[] = [];
+  private files: ComposerAttachment[] = [];
   private skills: SkillOption[] = [];
   private selectedSkills: string[] = [];
   private selectedAgents: string[] = [];
@@ -64,11 +122,41 @@ export class Composer {
   private goalDrivenByDefault = false;
   private workspaceGeneration = 0;
   private dictation: Dictation;
+  private dropOverlay = byId('drop-overlay');
+  private dropDepth = 0;
 
   constructor(private changed: () => void, private savePreference: (values: Partial<Pick<Preferences, 'defaultModel' | 'defaultAccess' | 'modelVariant'>>) => Promise<void>, canDictate: () => boolean) {
     this.dictation = new Dictation(this.input, canDictate);
     this.form.addEventListener('submit', event => { event.preventDefault(); void this.submit(); });
     this.input.addEventListener('input', () => { this.sync(); this.refreshMenu(); this.refreshMention(); });
+    this.input.addEventListener('paste', event => this.paste(event));
+    const wrap = this.form.closest('.composer-wrap') as HTMLElement;
+    wrap.addEventListener('dragenter', event => {
+      if (!this.hasFiles(event) || !this.session) return;
+      event.preventDefault();
+      this.dropDepth++;
+      this.dropOverlay.hidden = false;
+    });
+    wrap.addEventListener('dragover', event => {
+      if (!this.hasFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+    });
+    wrap.addEventListener('dragleave', () => {
+      this.dropDepth = Math.max(0, this.dropDepth - 1);
+      if (!this.dropDepth) this.dropOverlay.hidden = true;
+    });
+    wrap.addEventListener('drop', event => {
+      if (!this.hasFiles(event)) return;
+      event.preventDefault();
+      this.dropDepth = 0;
+      this.dropOverlay.hidden = true;
+      void this.attachFiles([...(event.dataTransfer?.files ?? [])]);
+    });
+    // Dropping a file anywhere else must never navigate the window away from Relay.
+    for (const type of ['dragover', 'drop'] as const) {
+      document.addEventListener(type, event => { if (this.hasFiles(event)) event.preventDefault(); });
+    }
     this.input.addEventListener('keydown', event => {
       if (this.mentionOpen) {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
@@ -286,7 +374,7 @@ export class Composer {
 
   private readDraft(): Draft {
     return {
-      text: this.input.value, files: [...this.files], access: this.access.value as AccessLevel, variant: this.preferredVariant,
+      text: this.input.value, files: this.files.map(file => ({ ...file })), access: this.access.value as AccessLevel, variant: this.preferredVariant,
       skills: [...this.selectedSkills], command: this.command, planOnly: this.planOnly,
       agents: [...this.selectedAgents], context: [...this.contextBlocks],
     };
@@ -294,7 +382,7 @@ export class Composer {
 
   private applyDraft(draft?: Draft): void {
     this.input.value = draft?.text ?? '';
-    this.files = [...(draft?.files ?? [])];
+    this.files = (draft?.files ?? []).map(file => ({ ...file }));
     this.selectedSkills = [...(draft?.skills ?? [])];
     this.selectedAgents = [...(draft?.agents ?? [])];
     this.contextBlocks = [...(draft?.context ?? [])];
@@ -667,8 +755,104 @@ export class Composer {
 
   attach(path: string): void {
     if (!this.session) return;
-    if (!this.files.includes(path)) this.files.push(path);
-    this.renderFiles(); this.input.focus();
+    this.mergeAttachments([attachmentFromPath(path)]);
+    this.input.focus();
+  }
+
+  private hasFiles(event: DragEvent): boolean {
+    return Array.from(event.dataTransfer?.types ?? []).includes('Files');
+  }
+
+  private paste(event: ClipboardEvent): void {
+    const data = event.clipboardData;
+    if (!data || !this.session) return;
+    if (data.files?.length) {
+      event.preventDefault();
+      void this.attachFiles([...data.files]);
+      return;
+    }
+    const linked = data.getData('text/uri-list').split('\n').map(line => line.trim()).find(line => line.startsWith('file://'));
+    const path = linked ? pathFromFileURL(linked) : '';
+    if (path) {
+      event.preventDefault();
+      void this.attachPaths([path]);
+      return;
+    }
+    const text = data.getData('text/plain');
+    if (text.length >= PASTE_ATTACH_CHARS) {
+      event.preventDefault();
+      void this.attachPastedText(text);
+    }
+  }
+
+  private async attachFiles(files: File[]): Promise<void> {
+    if (!this.session) { notify('Open a task before attaching files.', true); return; }
+    const room = MAX_ATTACHMENTS - this.files.length;
+    if (room <= 0) { notify(`A message can carry up to ${MAX_ATTACHMENTS} attachments.`, true); return; }
+    const added: ComposerAttachment[] = [];
+    for (const file of files.slice(0, room)) {
+      try {
+        if (file.size > MAX_ATTACHMENT_BYTES) throw new Error('Attachments must be smaller than 2 MB.');
+        const path = window.relay.filePath(file);
+        const staged = path
+          ? await window.relay.stageAttachment({ path })
+          : await window.relay.stageAttachment({ name: file.name || 'attachment', data: await fileData(file) });
+        added.push(this.fileAttachment(staged));
+      } catch (error) {
+        report(`Could not attach ${file.name || 'this file'}`, error);
+      }
+    }
+    this.mergeAttachments(added);
+    this.input.focus();
+  }
+
+  private async attachPaths(paths: string[]): Promise<void> {
+    if (!this.session) { notify('Open a task before attaching files.', true); return; }
+    const room = MAX_ATTACHMENTS - this.files.length;
+    const added: ComposerAttachment[] = [];
+    for (const path of paths.slice(0, Math.max(0, room))) {
+      try { added.push(this.fileAttachment(await window.relay.stageAttachment({ path }))); }
+      catch (error) { report(`Could not attach ${path.split('/').pop() || 'this file'}`, error); }
+    }
+    this.mergeAttachments(added);
+    this.input.focus();
+  }
+
+  private async attachPastedText(text: string): Promise<void> {
+    if (!this.session) return;
+    try {
+      const staged = await window.relay.stageAttachment({ name: `pasted-${Date.now().toString(36)}.txt`, text });
+      this.mergeAttachments([{
+        path: staged.path, name: previewLine(text) || 'Pasted text',
+        detail: `Pasted Text · ${formatBytes(staged.size)}`,
+      }]);
+      this.input.focus();
+    } catch (error) { report('Could not attach the pasted text', error); }
+  }
+
+  async pickAttachments(): Promise<void> {
+    if (!this.session) { notify('Open a task before attaching files.', true); return; }
+    try {
+      const staged = await window.relay.pickAttachments();
+      this.mergeAttachments(staged.map(item => this.fileAttachment(item)));
+      this.input.focus();
+    } catch (error) { report('Could not attach the chosen files', error); }
+  }
+
+  private fileAttachment(staged: StagedAttachment): ComposerAttachment {
+    return { path: staged.path, name: staged.name, detail: `${extensionLabel(staged.name)} · ${formatBytes(staged.size)}` };
+  }
+
+  private mergeAttachments(items: ComposerAttachment[]): void {
+    const merged = mergeByPath([...this.files, ...items]);
+    if (merged.length > MAX_ATTACHMENTS) {
+      notify(`A message can carry up to ${MAX_ATTACHMENTS} attachments.`, true);
+      merged.length = MAX_ATTACHMENTS;
+    }
+    if (merged.length === this.files.length && merged.every((item, index) => item.path === this.files[index]?.path)) return;
+    this.files = merged;
+    this.renderFiles();
+    this.sync();
   }
 
   addContext(label: string, text: string): boolean {
@@ -692,7 +876,7 @@ export class Composer {
   restoreQueued(message: QueuedMessage): void {
     if (!this.session) return;
     this.input.value = [message.text, this.input.value].filter(Boolean).join('\n\n');
-    this.files = [...new Set([...message.files, ...this.files])];
+    this.files = mergeByPath([...message.files.map(attachmentFromPath), ...this.files]);
     const known = new Set(this.skills.map(skill => skill.id));
     this.selectedSkills = [...new Set([...message.skills.filter(id => known.has(id)), ...this.selectedSkills])];
     this.selectedAgents = [...new Set([...message.agents, ...this.selectedAgents])];
@@ -708,10 +892,20 @@ export class Composer {
   focus(): void { this.input.focus(); }
 
   private renderFiles(): void {
-    byId('attachments').replaceChildren(...this.files.map(path => {
-      const remove = button(`${path} ×`, () => { this.files = this.files.filter(file => file !== path); this.renderFiles(); }, 'attachment');
-      remove.setAttribute('aria-label', `Remove attachment ${path}`);
-      return remove;
+    byId('attachments').replaceChildren(...this.files.map(attachment => {
+      const card = el('div', 'attachment file-card');
+      card.title = attachment.path;
+      const icon = fileIconElement(attachment.path.split('/').pop() || attachment.name, false);
+      icon.classList.add('file-card-icon');
+      const copy = el('span', 'file-card-copy');
+      copy.append(el('span', 'file-card-name', attachment.name), el('span', 'file-card-meta', attachment.detail));
+      const remove = button('×', () => {
+        this.files = this.files.filter(item => item.path !== attachment.path);
+        this.renderFiles(); this.sync();
+      }, 'file-card-remove');
+      remove.setAttribute('aria-label', `Remove attachment ${attachment.name}`);
+      card.append(icon, copy, remove);
+      return card;
     }));
   }
 
@@ -824,7 +1018,9 @@ export class Composer {
     const { agents, plugins, connectors } = this.mentionCache;
     const files = await window.relay.searchFiles(token.query, 'files').catch(() => []);
     if (generation !== this.mentionGeneration) return;
+    const atlas = atlasMention(token.query);
     const sources: MentionSource[] = [
+      ...(atlas ? [atlas] : []),
       ...files.slice(0, 6).map(result => ({
         kind: 'file' as const, id: result.path,
         name: result.path.split('/').pop() || result.path, detail: result.path, path: result.path,
@@ -856,7 +1052,7 @@ export class Composer {
   }
 
   private renderMentionMenu(): void {
-    const labels: Record<MentionSource['kind'], string> = { file: 'Files', skill: 'Skills', plugin: 'Plugins', agent: 'Agents', connector: 'Connectors' };
+    const labels: Record<MentionSource['kind'], string> = { atlas: 'Atlas', file: 'Files', skill: 'Skills', plugin: 'Plugins', agent: 'Agents', connector: 'Connectors' };
     const rows: HTMLElement[] = [];
     let lastKind = '';
     this.mentionSources.forEach((source, index) => {
@@ -893,6 +1089,10 @@ export class Composer {
     const token = parseMentionToken(this.input.value, caret);
     if (token) this.input.value = this.input.value.slice(0, token.start) + this.input.value.slice(Math.min(token.end, this.input.value.length));
     this.closeMentionMenu();
+    if (source.kind === 'atlas') {
+      this.pickKnowledge();
+      return;
+    }
     if (!this.session) { this.sync(); return; }
     if (source.kind === 'file' && source.path) {
       this.attach(source.path);
@@ -959,6 +1159,7 @@ export class Composer {
     this.interrupt.disabled = this.stopping.has(id) || !this.ready;
     this.send.hidden = running && !this.inputWhileRunning;
     byId<HTMLButtonElement>('attach-file').disabled = !this.session;
+    byId<HTMLButtonElement>('attach-files').disabled = !this.session;
     this.dictation.setEnabled(ready);
   }
 
@@ -968,7 +1169,8 @@ export class Composer {
     const generation = this.workspaceGeneration;
     const wasRunning = this.session.status === 'running' || this.sending.has(id);
     const text = this.input.value.trim();
-    const files = [...this.files];
+    const attachments = this.files.map(file => ({ ...file }));
+    const files = attachments.map(file => file.path);
     const skills = [...this.selectedSkills];
     const access = this.access.value as AccessLevel;
     const variant = this.resolvedVariant();
@@ -998,7 +1200,7 @@ export class Composer {
       if (generation === this.workspaceGeneration) {
         if (this.session?.id === id) {
           this.input.value = [text, this.input.value].filter(Boolean).join('\n\n');
-          this.files = [...new Set([...files, ...this.files])]; this.renderFiles();
+          this.files = mergeByPath([...attachments, ...this.files]); this.renderFiles();
           this.selectedSkills = [...new Set([...skills, ...this.selectedSkills])]; this.renderSkills();
           this.selectedAgents = [...new Set([...agents, ...this.selectedAgents])];
           this.contextBlocks = [...context, ...this.contextBlocks]; this.planOnly = planOnly;
@@ -1007,7 +1209,7 @@ export class Composer {
           const draft = this.drafts.get(id);
           this.drafts.set(id, {
             text: [text, draft?.text].filter(Boolean).join('\n\n'),
-            files: [...new Set([...files, ...(draft?.files ?? [])])],
+            files: mergeByPath([...attachments, ...(draft?.files ?? [])]),
             access, variant, skills: [...new Set([...skills, ...(draft?.skills ?? [])])],
             command: draft?.command || command, planOnly: planOnly || (draft?.planOnly ?? false),
             agents: [...new Set([...agents, ...(draft?.agents ?? [])])],

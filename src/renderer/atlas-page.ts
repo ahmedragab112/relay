@@ -1,9 +1,27 @@
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import { byId, el, report, run } from './dom';
-import { ATLAS_LANGUAGE_KEY, isAtlasLanguage, type AtlasCard, type AtlasLanguage, type AtlasView } from '../shared/atlas';
+import { ATLAS_LANGUAGE_KEY, ATLAS_ROOT, atlasProgress, isAtlasLanguage, type AtlasCard, type AtlasLanguage, type AtlasView } from '../shared/atlas';
+import type { SessionSummary, Workspace } from '../shared/contracts';
 
 type AtlasMode = 'pages' | 'cards';
+
+const OPEN_FOLDER = '__open';
+
+export interface AtlasTarget {
+  sessionId?: string;
+  create?: boolean;
+}
+
+export interface AtlasPanelOptions {
+  openFile: (path: string, line?: number) => void;
+  tasks: () => SessionSummary[];
+  workspacePath: () => string | undefined;
+  folders: () => Workspace[];
+  folder: () => string | undefined;
+  openFolder: (id: string) => void;
+  openProject: () => void;
+}
 
 function renderMarkdown(text: string, openFile: (path: string, line?: number) => void): HTMLElement {
   const node = el('div', 'markdown atlas-markdown');
@@ -56,11 +74,27 @@ export class AtlasPanel {
   private cardsRequest = 0;
   private cardsLoaded?: string;
   private treeSignature = '';
+  private target = '';
+  private pendingCreate = false;
+  private targetSignature = '';
+  private folderSignature = '';
 
-  constructor(private readonly openFile: (path: string, line?: number) => void) {
-    byId('atlas-close').addEventListener('click', () => this.close());
-    byId('atlas-refresh').addEventListener('click', () => void this.reload(true));
+  constructor(private readonly options: AtlasPanelOptions) {
     byId('atlas-generate').addEventListener('click', () => void this.generate());
+    byId<HTMLSelectElement>('atlas-folder').addEventListener('change', () => {
+      const select = byId<HTMLSelectElement>('atlas-folder');
+      const value = select.value;
+      if (value === OPEN_FOLDER) {
+        select.value = this.options.folder() ?? '';
+        this.options.openProject();
+        return;
+      }
+      if (value && value !== this.options.folder()) this.options.openFolder(value);
+    });
+    byId('atlas-target').addEventListener('change', () => {
+      this.target = byId<HTMLSelectElement>('atlas-target').value;
+      if (this.view) this.render(this.view);
+    });
     byId('atlas-cancel').addEventListener('click', () => void this.cancel());
     byId('atlas-sync').addEventListener('click', () => void this.sync());
     byId('atlas-edit').addEventListener('click', () => this.startEdit());
@@ -68,6 +102,9 @@ export class AtlasPanel {
     byId('atlas-cancel-edit').addEventListener('click', () => this.cancelEdit());
     byId('atlas-mode-pages').addEventListener('click', () => this.setMode('pages'));
     byId('atlas-mode-cards').addEventListener('click', () => this.setMode('cards'));
+    byId('atlas-reveal').addEventListener('click', () => {
+      void run(byId<HTMLButtonElement>('atlas-reveal'), () => window.relay.revealAtlas(this.language()), (error) => report('Could not open the Atlas folder', error));
+    });
     byId<HTMLSelectElement>('atlas-language').addEventListener('change', () => {
       localStorage.setItem(ATLAS_LANGUAGE_KEY, this.language());
       this.stopEditing();
@@ -78,21 +115,27 @@ export class AtlasPanel {
     });
   }
 
-  get isOpen(): boolean { return !byId('atlas-page').hidden; }
+  get isOpen(): boolean { return !byId('atlas-panel').hidden; }
 
-  open(): void {
-    byId<HTMLButtonElement>('atlas-button').setAttribute('aria-pressed', 'true');
-    byId('atlas-page').hidden = false;
-    byId('app').classList.add('atlas-open');
+  /** Opens the Atlas tab. A target from a folder or task hover action may also start a build. */
+  async open(target?: AtlasTarget): Promise<void> {
+    this.stopEditing();
+    this.target = target?.sessionId ?? '';
+    this.pendingCreate = Boolean(target?.create);
     byId<HTMLSelectElement>('atlas-language').value = this.language();
-    void this.reload();
+    this.targetSignature = '';
+    this.populateTargets();
+    const view = await this.reload();
+    if (this.pendingCreate && this.isOpen && !view?.manifest && view?.status.state !== 'planning' && view?.status.state !== 'writing') {
+      this.pendingCreate = false;
+      await this.generate();
+    }
+    this.pendingCreate = false;
   }
 
-  close(): void {
+  hide(): void {
     this.stopEditing();
-    byId('atlas-page').hidden = true;
-    byId('app').classList.remove('atlas-open');
-    byId<HTMLButtonElement>('atlas-button').setAttribute('aria-pressed', 'false');
+    this.pendingCreate = false;
   }
 
   setWorkspace(workspaceId?: string): void {
@@ -117,24 +160,90 @@ export class AtlasPanel {
     return document.documentElement.lang === 'ar' ? 'ar' : 'en';
   }
 
-  async reload(force = false): Promise<void> {
+  async reload(force = false): Promise<AtlasView | undefined> {
     if (force) this.loaded = undefined;
-    if (!this.workspace) { this.renderEmpty('Open a project folder to give Atlas code to read.'); return; }
+    this.populateFolders();
+    if (!this.workspace) { byId('atlas-progress').hidden = true; this.renderEmpty('Open a project folder to give Atlas code to read.'); return undefined; }
     const language = this.language();
     const request = ++this.request;
     try {
       const view = await window.relay.atlasView(language);
-      if (request === this.request && view.language === this.language()) this.render(view);
+      if (request !== this.request || view.language !== this.language()) return undefined;
+      this.render(view);
+      return view;
     } catch (error) {
       if (request === this.request) report('Could not open Atlas', error);
+      return undefined;
     }
+  }
+
+  private populateTargets(): void {
+    const signatures: string[] = [];
+    const tasks = this.options.tasks();
+    const select = byId<HTMLSelectElement>('atlas-target');
+    const options: HTMLOptionElement[] = [];
+    const folder = document.createElement('option');
+    folder.value = '';
+    folder.textContent = 'This project';
+    options.push(folder);
+    for (const task of tasks) {
+      const signature = `${task.id}:${task.title}`;
+      signatures.push(signature);
+      const option = document.createElement('option');
+      option.value = task.id;
+      option.textContent = `Task — ${task.title}`;
+      options.push(option);
+    }
+    const next = signatures.join('|');
+    if (next !== this.targetSignature) {
+      this.targetSignature = next;
+      const previous = this.target;
+      select.replaceChildren(...options);
+      if (!signatures.some((item) => item.startsWith(`${previous}:`)) && previous) this.target = '';
+      select.value = this.target;
+    } else {
+      select.value = this.target;
+    }
+  }
+
+  private populateFolders(): void {
+    const select = byId<HTMLSelectElement>('atlas-folder');
+    const folders = this.options.folders();
+    const current = this.options.folder() ?? '';
+    const signature = `${folders.map((folder) => `${folder.id}:${folder.name}:${folder.path}`).join('|')}#${current}`;
+    if (signature !== this.folderSignature) {
+      this.folderSignature = signature;
+      const options: HTMLOptionElement[] = [];
+      if (!current) {
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = 'Choose a folder…';
+        placeholder.disabled = true;
+        options.push(placeholder);
+      }
+      for (const folder of folders) {
+        const option = document.createElement('option');
+        option.value = folder.id;
+        option.textContent = folder.name;
+        option.title = folder.path;
+        options.push(option);
+      }
+      const browse = document.createElement('option');
+      browse.value = OPEN_FOLDER;
+      browse.textContent = 'Open folder…';
+      options.push(browse);
+      select.replaceChildren(...options);
+    }
+    select.value = current;
   }
 
   private async generate(): Promise<void> {
     const language = this.language();
     const button = byId<HTMLButtonElement>('atlas-generate');
+    const sessionId = this.target || undefined;
+    const sourceTitle = sessionId ? this.options.tasks().find((item) => item.id === sessionId)?.title : undefined;
     await run(button, async () => {
-      try { this.render(await window.relay.generateAtlas(language)); }
+      try { this.render(await window.relay.generateAtlas(language, sessionId, sourceTitle)); }
       catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (!/canceled/i.test(message)) report('Atlas could not finish', error);
@@ -150,10 +259,14 @@ export class AtlasPanel {
 
   private render(view: AtlasView): void {
     this.view = view;
+    this.populateTargets();
+    this.populateFolders();
     byId<HTMLSelectElement>('atlas-language').value = view.language;
     const busy = view.status.state === 'planning' || view.status.state === 'writing';
     const generate = byId<HTMLButtonElement>('atlas-generate');
-    generate.textContent = view.manifest ? 'Update' : 'Generate';
+    generate.textContent = view.manifest
+      ? this.target ? 'Update with this task' : 'Update Atlas'
+      : this.target ? 'Create from this task' : 'Create Atlas';
     generate.disabled = busy || !this.workspace || this.editing;
     byId('atlas-cancel').hidden = !busy;
     byId<HTMLButtonElement>('atlas-sync').hidden = !view.manifest || busy || this.editing;
@@ -162,6 +275,8 @@ export class AtlasPanel {
     byId('atlas-mode-pages').setAttribute('aria-pressed', String(this.mode === 'pages'));
     byId('atlas-mode-cards').setAttribute('aria-pressed', String(this.mode === 'cards'));
     this.renderSummary(view);
+    this.renderProgress(view);
+    this.renderMeta(view);
     if (this.mode === 'pages') this.renderPage(view);
     else this.renderCardsMode(view);
     this.renderTree(view);
@@ -208,8 +323,41 @@ export class AtlasPanel {
     if (view.plan.present) parts.push(`Plan file found (${view.plan.documents} ${view.plan.documents === 1 ? 'page' : 'pages'} requested).`);
     if (view.cards.present) parts.push(`${view.cards.count} knowledge ${view.cards.count === 1 ? 'card' : 'cards'}.`);
     if (view.baseline?.stale) parts.push('Code changed since this build — press Update.');
+    if (this.target) {
+      const task = this.options.tasks().find((item) => item.id === this.target);
+      parts.push(task ? `The next build also reads “${task.title}”.` : 'The selected task is no longer available; the next build uses the folder only.');
+    }
     byId('atlas-summary').textContent = parts.join(' ');
     byId('atlas-summary').title = view.plan.warnings.join('\n');
+  }
+
+  private renderProgress(view: AtlasView): void {
+    const host = byId('atlas-progress');
+    const progress = atlasProgress(view.status);
+    if (!progress) { host.hidden = true; return; }
+    host.hidden = false;
+    host.setAttribute('aria-valuenow', String(progress.percent));
+    byId('atlas-progress-fill').style.width = `${progress.percent}%`;
+    byId('atlas-progress-label').textContent = `${progress.percent}% · ${progress.phase}`;
+  }
+
+  /** Where the Markdown lives on disk and which task the last build read. */
+  private renderMeta(view?: AtlasView): void {
+    const meta = byId('atlas-meta');
+    const path = this.options.workspacePath();
+    meta.hidden = !path;
+    if (!path) return;
+    const location = byId('atlas-location');
+    location.textContent = `${ATLAS_ROOT}/${view?.language ?? this.language()}/`;
+    location.title = path;
+    const source = view?.manifest?.source;
+    const label = !source
+      ? ''
+      : source.kind === 'task'
+        ? source.title ? `Built from task “${source.title}”` : 'Built from a task'
+        : 'Built from the folder';
+    byId('atlas-source').textContent = label;
+    byId('atlas-source').hidden = !label;
   }
 
   private renderTree(view: AtlasView): void {
@@ -299,7 +447,7 @@ export class AtlasPanel {
       const text = await window.relay.atlasPage(language, slug);
       if (request !== this.pageRequest || slug !== this.slug) return;
       this.source = text;
-      reader.replaceChildren(renderMarkdown(text, this.openFile));
+      reader.replaceChildren(renderMarkdown(text, this.options.openFile));
       reader.scrollTop = 0;
     } catch (error) {
       if (request !== this.pageRequest) return;
@@ -436,7 +584,7 @@ export class AtlasPanel {
         const open = el('button', 'atlas-card-path', path);
         open.type = 'button';
         open.title = `Open ${path}`;
-        open.addEventListener('click', () => this.openFile(path));
+        open.addEventListener('click', () => this.options.openFile(path));
         head.append(open);
       }
       node.append(head);
@@ -500,6 +648,7 @@ export class AtlasPanel {
 
   private renderEmpty(message: string): void {
     this.source = '';
+    this.renderMeta();
     const reader = byId('atlas-reader');
     reader.replaceChildren(el('p', 'atlas-reader-note', message));
     byId('atlas-tree').replaceChildren();
@@ -509,6 +658,7 @@ export class AtlasPanel {
     byId('atlas-save').hidden = true;
     byId('atlas-cancel-edit').hidden = true;
     byId('atlas-sync').hidden = true;
+    byId<HTMLButtonElement>('atlas-generate').disabled = true;
     byId<HTMLButtonElement>('atlas-mode-cards').disabled = true;
     this.treeSignature = '';
   }

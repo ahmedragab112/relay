@@ -24,6 +24,7 @@ await writeFile(join(pastProject, 'README.md'), '# Past relay project\n');
 await mkdir(join(project, 'src'));
 await writeFile(join(project, 'src', 'app.ts'), 'export const greeting = "hello";\n');
 const recordings = [];
+const chatBodies = [];
 const preview = createServer((request, response) => {
   if (request.method === 'POST' && request.url === '/v1/audio/transcriptions') {
     let size = 0;
@@ -39,6 +40,7 @@ const preview = createServer((request, response) => {
     let body = '';
     request.on('data', (chunk) => { body += chunk; });
     request.on('end', () => {
+      chatBodies.push(body);
       let model = 'test-model';
       try { model = JSON.parse(body).model ?? model; } catch { /* keep the default */ }
       const base = { id: 'chatcmpl-relay-test', object: 'chat.completion.chunk', created: Math.floor(Date.now() / 1000), model };
@@ -141,6 +143,16 @@ async function waitFor(expression, timeout = 30_000) {
   await page.waitForFunction(expression, undefined, { timeout });
 }
 
+async function waitForRequestBody(predicate, timeout = 30_000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const match = chatBodies.find(predicate);
+    if (match) return match;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return undefined;
+}
+
 async function dismissNotice(step) {
   const notice = await page.evaluate(() => {
     const node = document.querySelector('#notice');
@@ -154,11 +166,12 @@ async function dismissNotice(step) {
   await page.evaluate(() => document.getElementById('dismiss-notice')?.click());
 }
 
-console.log('Launching onboarding state');
+console.log('Launching the no-folder workspace');
 await launch();
-assert.equal(await text('#workspace-path'), 'No project open');
-assert.match(await text('#engine-status'), /Engine stopped/);
-assert.match(await text('#conversation'), /Build with your own models/);
+assert.equal(await text('#workspace-button'), 'No folder');
+assert.match(await text('#workspace-path'), /[\\/]relay[\\/]scratch$/);
+await waitFor(() => document.querySelector('#engine-status')?.textContent?.startsWith('Engine ready'));
+assert.match(await text('#conversation'), /What should we work on\?/);
 assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.relay), 'object');
@@ -217,18 +230,19 @@ assert.equal(await page.locator('#model-select, #power-select').count(), 0, 'the
 await page.click('#model-button');
 await waitFor(() => document.querySelector('#model-menu')?.hidden === false, 10_000);
 assert.equal(await page.locator('#model-menu .model-entry.selected').count(), 1, 'the model dropdown did not mark the Auto entry as selected on a fresh preference');
-const modelMenu = await page.evaluate(async () => {
-  const models = await window.relay.listModels();
-  const expected = models.filter(model => model.variants?.length).length;
-  const selected = document.querySelector('#model-menu .model-entry.selected');
-  return {
-    expected,
-    shown: document.querySelectorAll('#model-menu .model-power').length,
-    selectedRows: selected ? [...selected.querySelectorAll('.model-power-option')].map(chip => chip.textContent ?? '') : [],
-  };
+// The hosted free catalog rotates while the suite runs, so assert on the deterministic
+// local model's chips instead of comparing two snapshots of the whole list.
+const powerOptions = await page.evaluate(() => {
+  const entry = [...document.querySelectorAll('#model-menu .model-entry')]
+    .find(node => (node.querySelector('.model-option')?.textContent ?? '').includes('test-model'));
+  return entry ? [...entry.querySelectorAll('.model-power-option')].map(chip => chip.textContent ?? '') : [];
 });
-assert.equal(modelMenu.shown, modelMenu.expected, 'models with power levels did not show them inline in the dropdown');
-assert.equal(modelMenu.selectedRows.length, 0, 'the Auto entry should not show power choices');
+assert.deepEqual(powerOptions, ['Default', 'Low', 'Medium', 'High'], 'models with power levels did not show them inline in the dropdown');
+const selectedRows = await page.evaluate(() => {
+  const selected = document.querySelector('#model-menu .model-entry.selected');
+  return selected ? [...selected.querySelectorAll('.model-power-option')].map(chip => chip.textContent ?? '') : [];
+});
+assert.equal(selectedRows.length, 0, 'the Auto entry should not show power choices');
 await page.screenshot({ path: join(artifacts, 'model-menu.png') });
 // Picking a concrete model persists the preference the rest of the suite relies on.
 await page.locator('#model-menu .model-option', { hasText: 'test-model' }).first().click();
@@ -1054,6 +1068,14 @@ await settings.getByRole('tab', { name: 'Context & usage' }).click();
 assert.match(await settings.locator('.settings-pane').textContent(), /Auto-compact long conversations/);
 await settings.locator('button[aria-label="Close settings"]').click();
 
+console.log('Toggling the theme from the sidebar footer');
+await page.click('#theme-toggle');
+await waitFor(() => document.documentElement.dataset.theme === 'dark');
+assert.equal(await page.locator('#theme-toggle').getAttribute('aria-pressed'), 'false');
+await page.click('#theme-toggle');
+await waitFor(() => document.documentElement.dataset.theme === 'light');
+assert.equal(await page.locator('#theme-toggle').getAttribute('aria-pressed'), 'true');
+
 console.log('Searching file contents and previewing a diff on focus');
 await page.click('#conversation');
 await page.keyboard.press(`${mod}+f`);
@@ -1164,6 +1186,126 @@ assert.match(recordings[0].contentType, /multipart\/form-data/);
 await page.screenshot({ path: join(artifacts, 'dictation.png') });
 await page.fill('#prompt', '');
 
+console.log('Reading Atlas and teaching a fresh task from it');
+const atlasDir = join(project, '.relay', 'atlas', 'en');
+await mkdir(join(atlasDir, 'knowledge'), { recursive: true });
+await writeFile(join(atlasDir, 'overview.md'), '# Architecture overview\n\nRelay keeps agent tasks in a shared window.\n');
+await writeFile(join(atlasDir, 'modules.md'), '# Modules\n\nThe composer talks to the engine.\n');
+await writeFile(join(atlasDir, 'manifest.json'), JSON.stringify({
+  version: 1, language: 'en', project: basename(project), generatedAt: Date.now(),
+  pages: [
+    { slug: 'overview', title: 'Architecture overview', summary: 'How Relay fits together' },
+    { slug: 'modules', title: 'Modules', parent: 'overview', summary: 'The composer and the engine' },
+  ],
+}, null, 2));
+await writeFile(join(atlasDir, 'knowledge', 'cards.json'), JSON.stringify({
+  cards: [
+    { name: 'Composer', path: 'src/app.ts', summary: 'Sends the composed message to the engine.', page: 'overview', dependsOn: ['Engine'], relatedTo: ['Atlas'] },
+  ],
+}, null, 2));
+await page.evaluate(() => localStorage.setItem('relay.atlas.language', 'en'));
+assert.equal(await page.evaluate(() => Boolean(document.querySelector('#atlas-button'))), false, 'Atlas should no longer sit in the top navigation');
+await page.click('#tools-button');
+await page.click('#tools-tab-atlas');
+await waitFor(() => document.querySelector('#tools-page')?.hidden === false && document.querySelector('#atlas-panel')?.hidden === false);
+assert.equal(await text('#tools-title'), 'Atlas');
+await waitFor(() => document.querySelectorAll('#atlas-tree .atlas-page-link').length === 2);
+assert.equal(await text('#atlas-page-label'), 'Architecture overview');
+await waitFor(() => /Relay keeps agent tasks/.test(document.querySelector('#atlas-reader')?.textContent ?? ''));
+await page.locator('#atlas-tree .atlas-page-link', { hasText: 'Modules' }).click();
+await waitFor(() => /The composer talks to the engine/.test(document.querySelector('#atlas-reader')?.textContent ?? ''));
+await page.click('#atlas-mode-cards');
+await waitFor(() => /Composer/.test(document.querySelector('#atlas-reader .atlas-card')?.textContent ?? ''));
+assert.match(await text('#atlas-reader'), /Depends on[\s\S]*Engine/);
+await page.screenshot({ path: join(artifacts, 'atlas.png') });
+console.log('Streaming Atlas build progress');
+const seededManifest = JSON.parse(await readFile(join(atlasDir, 'manifest.json'), 'utf8'));
+const pushAtlasStatus = (status) => app.evaluate(({ BrowserWindow }, payload) => {
+  BrowserWindow.getAllWindows()[0].webContents.send('app:event', payload);
+}, {
+  type: 'atlas',
+  workspaceId: workspaceId(projectPath),
+  view: {
+    language: 'en',
+    manifest: seededManifest,
+    plan: { present: false, warnings: [], documents: 0 },
+    status,
+    cards: { present: true, count: 1, warnings: [] },
+  },
+});
+const progress = () => page.evaluate(() => {
+  const host = document.querySelector('#atlas-progress');
+  return { hidden: host?.hidden, value: host?.getAttribute('aria-valuenow'), label: document.querySelector('#atlas-progress-label')?.textContent ?? '' };
+});
+assert.equal((await progress()).hidden, true, 'an idle Atlas view should not show a progress bar');
+await pushAtlasStatus({ state: 'writing', writing: 2, total: 4 });
+await waitFor(() => document.querySelector('#atlas-progress')?.getAttribute('aria-valuenow') === '53');
+assert.deepEqual(await progress(), { hidden: false, value: '53', label: '53% · Writing pages 2 of 4' });
+await pushAtlasStatus({ state: 'writing', writing: 4, total: 4 });
+await waitFor(() => document.querySelector('#atlas-progress')?.getAttribute('aria-valuenow') === '95');
+await pushAtlasStatus({ state: 'ready' });
+await waitFor(() => document.querySelector('#atlas-progress')?.getAttribute('aria-valuenow') === '100');
+assert.equal((await progress()).label, '100% · Atlas is ready');
+await page.screenshot({ path: join(artifacts, 'atlas-progress.png') });
+await pushAtlasStatus({ state: 'idle' });
+await waitFor(() => document.querySelector('#atlas-progress')?.hidden === true);
+await page.click('#atlas-mode-pages');
+await waitFor(() => /The composer talks to the engine/.test(document.querySelector('#atlas-reader')?.textContent ?? ''));
+await page.click('#tools-close');
+await waitFor(() => document.querySelector('#tools-page')?.hidden === true);
+
+console.log('Opening Atlas from folder and task hover actions');
+await page.locator('#task-list .task-group.current .task-group-atlas').click();
+await waitFor(() => document.querySelector('#atlas-panel')?.hidden === false);
+assert.equal(await page.evaluate(() => document.querySelector('#atlas-target').value), '');
+await waitFor(() => /Update Atlas/.test(document.querySelector('#atlas-generate')?.textContent ?? ''));
+const hoverTask = await page.evaluate(() => {
+  const control = document.querySelector('#task-list .task-group.current .task-node .task-atlas');
+  return control?.closest('.task-node')?.dataset.session ?? '';
+});
+assert.ok(hoverTask, 'no task offered an Atlas hover action');
+await page.click('#tools-close');
+await waitFor(() => document.querySelector('#tools-page')?.hidden === true);
+await page.locator(`#task-list .task-node[data-session="${hoverTask}"] .task-atlas`).click();
+await waitFor(() => document.querySelector('#atlas-panel')?.hidden === false);
+assert.equal(await page.evaluate(() => document.querySelector('#atlas-target').value), hoverTask);
+await waitFor(() => /next build also reads/.test(document.querySelector('#atlas-summary')?.textContent ?? ''));
+assert.match(await text('#atlas-generate'), /Update with this task/);
+await page.click('#tools-close');
+await waitFor(() => document.querySelector('#tools-page')?.hidden === true);
+
+await waitFor(() => !document.querySelector('#new-task')?.disabled, 20_000);
+await page.click('#new-task');
+await waitFor(() => !document.querySelector('#prompt')?.disabled, 20_000);
+console.log('Mentioning Atlas from the composer');
+await page.fill('#prompt', '@atl');
+await waitFor(() => !document.querySelector('#mention-menu')?.hidden && /Atlas/.test(document.querySelector('#mention-menu')?.textContent ?? ''), 20_000);
+await page.locator('#mention-menu .command-option', { hasText: 'Atlas' }).first().click();
+const mentionDialog = page.locator('dialog[aria-label="Atlas knowledge"]');
+await mentionDialog.waitFor();
+await waitFor(() => /Architecture overview/.test(document.querySelector('dialog[aria-label="Atlas knowledge"]')?.textContent ?? ''), 20_000);
+assert.match(await mentionDialog.textContent(), /Architecture overview/);
+await mentionDialog.getByRole('button', { name: 'Close dialog' }).click();
+await waitFor(() => document.querySelector('dialog[aria-label="Atlas knowledge"]')?.open === false);
+await page.fill('#prompt', '/knowledge');
+await waitFor(() => !document.querySelector('#command-menu')?.hidden && /\/knowledge/.test(document.querySelector('#command-menu')?.textContent ?? ''), 20_000);
+await page.locator('#command-menu .command-option', { hasText: '/knowledge' }).click();
+const knowledgeDialog = page.locator('dialog[aria-label="Atlas knowledge"]');
+await knowledgeDialog.waitFor();
+await knowledgeDialog.getByRole('checkbox', { name: /^Architecture overview/ }).check();
+await knowledgeDialog.getByRole('checkbox', { name: /^Composer\b/ }).check();
+await knowledgeDialog.locator('button', { hasText: 'Attach' }).click();
+await waitFor(() => (document.querySelector('#context-chips')?.textContent ?? '').includes('Atlas: Architecture overview'));
+assert.match(await text('#context-chips'), /Atlas card: Composer/);
+await page.fill('#prompt', 'relay-atlas-index check the wiki');
+await page.click('#send-message');
+await waitFor(() => /Hello from the test model\./.test(document.querySelector('#conversation')?.textContent ?? ''), 40_000);
+const atlasPrompt = await waitForRequestBody((body) => body.includes('relay-atlas-index') && body.includes('.relay/atlas/en/overview.md'));
+assert.ok(atlasPrompt, 'a fresh task did not receive the Atlas index with its first message');
+assert.match(atlasPrompt, /Architecture overview/, 'the Atlas index did not name the seeded page');
+assert.match(atlasPrompt, /Relay keeps agent tasks/, 'the attached Atlas page content never reached the model');
+await page.screenshot({ path: join(artifacts, 'atlas-knowledge.png') });
+
 console.log('Restarting to verify task persistence');
 const tasksBeforeRestart = await page.evaluate(() => document.querySelectorAll('#task-list .task-button').length);
 await app.close();
@@ -1210,6 +1352,14 @@ await page.screenshot({ path: join(artifacts, 'folders.png') });
 await pastGroup.locator('.task-group-toggle').click();
 await waitFor(() => document.querySelectorAll('#task-list .task-group')[1]?.querySelector('.task-group-body')?.classList.contains('collapsed') === false);
 assert.equal(await pastGroup.locator('.task-group-toggle').getAttribute('aria-expanded'), 'true');
+
+console.log('The Workspaces header collapses and reopens every folder');
+await page.click('#workspaces-toggle');
+await waitFor(() => [...document.querySelectorAll('#task-list .task-group-body')].every(body => body.classList.contains('collapsed')));
+assert.equal(await page.getAttribute('#workspaces-toggle', 'aria-expanded'), 'false');
+await page.click('#workspaces-toggle');
+await waitFor(() => [...document.querySelectorAll('#task-list .task-group-body')].every(body => !body.classList.contains('collapsed')));
+assert.equal(await page.getAttribute('#workspaces-toggle', 'aria-expanded'), 'true');
 
 console.log('Opening a task from a previous folder switches projects');
 await pastGroup.locator('.task-button').click();

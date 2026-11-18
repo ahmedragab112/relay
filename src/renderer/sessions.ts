@@ -3,7 +3,7 @@ import { SCRATCH_WORKSPACE_ID } from '../shared/contracts';
 import { byId, button, el, errorText } from './dom';
 import { askText, confirmAction, dialog } from './dialog';
 import { fileIconElement } from './file-icons';
-import { groupTasks, type TaskGroup } from './task-groups';
+import { groupTasks, toggleCollapsed, type TaskGroup } from './task-groups';
 import { forkForest, type ForkNode } from './fork-graph';
 
 const DOT_CENTER = 15;
@@ -15,6 +15,33 @@ function taskLoader(): HTMLElement {
   loader.setAttribute('aria-hidden', 'true');
   loader.append(el('i'), el('i'), el('i'));
   return loader;
+}
+
+export interface AtlasActionTarget {
+  workspaceId: string;
+  sessionId?: string;
+}
+
+function atlasGlyph(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '12');
+  svg.setAttribute('height', '12');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.6');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  for (const [tag, attrs] of [
+    ['path', { d: 'M4.5 5.6A1.6 1.6 0 0 1 6.1 4H11v16H6.1a1.6 1.6 0 0 1-1.6-1.6z' }],
+    ['path', { d: 'M19.5 5.6A1.6 1.6 0 0 0 17.9 4H13v16h4.9a1.6 1.6 0 0 0 1.6-1.6z' }],
+  ] as Array<[string, Record<string, string>]>) {
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attrs)) shape.setAttribute(key, value);
+    svg.append(shape);
+  }
+  return svg;
 }
 
 function branchGlyph(): SVGSVGElement {
@@ -64,6 +91,7 @@ export class Sessions {
     private openFolder: (workspaceId: string) => Promise<boolean> = async () => false,
     private onRevert: () => void = () => {},
     private waiting: (sessionId: string) => boolean = () => false,
+    private atlas: (target: AtlasActionTarget) => void = () => {},
   ) {}
 
   private static skeleton(): HTMLElement {
@@ -131,6 +159,14 @@ export class Sessions {
   async resume(id: string): Promise<void> {
     this.queued = id;
     await this.reload();
+  }
+
+  /** Workspaces header toggle; returns true when every group is now collapsed. */
+  toggleAll(): boolean {
+    this.collapsed = toggleCollapsed(this.groups.map(group => group.id), this.collapsed);
+    this.signature = '';
+    this.render();
+    return this.collapsed.size > 0;
   }
 
   async create(workspaceId?: string): Promise<void> {
@@ -267,6 +303,15 @@ export class Sessions {
       this.signature = this.snapshot();
     });
     head.append(toggle);
+    if (group.path) {
+      const atlas = el('button', 'task-group-open task-group-atlas', '');
+      atlas.type = 'button';
+      atlas.title = `Create Atlas for ${group.name}`;
+      atlas.setAttribute('aria-label', `Create Atlas for ${group.name}`);
+      atlas.append(atlasGlyph());
+      atlas.addEventListener('click', () => this.atlas({ workspaceId: group.id }));
+      head.append(atlas);
+    }
     if (!group.current && group.path) {
       const open = button('↗', () => { this.openFolderGroup(group); }, 'task-group-open');
       open.title = `Open ${group.path}`;
@@ -277,7 +322,7 @@ export class Sessions {
     const forest = forkForest(group.sessions);
     if (forest.length) {
       const titles = new Map(group.sessions.map(session => [session.id, session.title]));
-      forest.forEach(node => inner.append(this.task(node, titles)));
+      forest.forEach(node => inner.append(this.task(node, titles, group.path ? group.id : undefined)));
     } else inner.append(el('p', 'small muted task-group-empty', group.current ? 'No tasks in this folder yet.' : 'No tasks yet.'));
     body.append(inner);
     node.append(body);
@@ -289,7 +334,7 @@ export class Sessions {
     void this.openFolder(group.id).then(opened => { if (!opened) this.queued = ''; });
   }
 
-  private task(node: ForkNode, titles: Map<string, string>): HTMLElement {
+  private task(node: ForkNode, titles: Map<string, string>, folder?: string): HTMLElement {
     const { session, depth, last, lanes, branches } = node;
     const wrapper = el('div', 'task-node');
     wrapper.dataset.session = session.id;
@@ -348,6 +393,18 @@ export class Sessions {
     }
     control.title = parentTitle ? `${session.title} — branched from ${parentTitle}` : session.title;
     wrapper.append(control);
+    if (folder) {
+      const atlas = el('button', 'task-atlas', '');
+      atlas.type = 'button';
+      atlas.title = `Create Atlas from “${session.title}”`;
+      atlas.setAttribute('aria-label', `Create Atlas from ${session.title}`);
+      atlas.append(atlasGlyph());
+      atlas.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.atlas({ workspaceId: folder, sessionId: session.id });
+      });
+      wrapper.append(atlas);
+    }
     return wrapper;
   }
 

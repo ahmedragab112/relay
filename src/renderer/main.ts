@@ -10,7 +10,7 @@ import { QueueView } from './queue';
 import { InspectorSplitter } from './splitter';
 import { Inspector } from './inspector';
 import { RequestView } from './requests';
-import { Sessions } from './sessions';
+import { Sessions, type AtlasActionTarget } from './sessions';
 import { BranchBar } from './branch-bar';
 import { AttentionView } from './attention';
 import { ToolsPage, type ToolsMode } from './tools-page';
@@ -18,7 +18,7 @@ import { playChime } from './chime';
 import { TerminalView } from './terminal';
 import { showSettings, closeSettings } from './settings';
 import { showAutomation, closeAutomation } from './automation';
-import { AtlasPanel } from './atlas-page';
+import { AtlasPanel, type AtlasTarget } from './atlas-page';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
 import { showSearch, showTaskSearch } from './search';
@@ -74,12 +74,35 @@ const composer = new Composer(() => {
   const provider = state?.providers.find(item => item.id === preferences.provider);
   return Boolean(provider && (provider.hasKey || providerPreset(preferences.provider)?.keyless));
 });
-const sessions = new Sessions(selectSession, openFolder, () => reviewReload.request(), id => requests.pendingFor(id) > 0);
+const sessions = new Sessions(selectSession, openFolder, () => reviewReload.request(), id => requests.pendingFor(id) > 0,
+  target => { void openAtlas(target); });
 const scope = new ScopeChip(id => switchScope(id), () => switchScope('choose'));
 const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
-const tools = new ToolsPage({ openTask: openSession, openFolder: id => { void openFolder(id); } });
-const atlas = new AtlasPanel((path, line) => { closeOverlayPages(); showInspector(); inspector.openPath(path, line); });
+let pendingAtlasTarget: AtlasTarget | undefined;
+const tools = new ToolsPage({
+  openTask: openSession,
+  openFolder: id => { void openFolder(id); },
+  atlasOpen: () => {
+    const target = pendingAtlasTarget;
+    pendingAtlasTarget = undefined;
+    void atlas.open(target);
+  },
+  atlasRefresh: () => { void atlas.reload(true); },
+  atlasClose: () => atlas.hide(),
+});
+const atlas = new AtlasPanel({
+  openFile: (path, line) => { closeOverlayPages(); showInspector(); inspector.openPath(path, line); },
+  tasks: () => {
+    const path = state?.workspace?.path;
+    return path ? sessions.items.filter(item => item.directory === path) : [];
+  },
+  workspacePath: () => state?.workspace?.path,
+  folders: () => (state?.workspaces ?? []).filter(item => item.id !== SCRATCH_WORKSPACE_ID),
+  folder: () => state?.workspace && state.workspace.id !== SCRATCH_WORKSPACE_ID ? state.workspace.id : undefined,
+  openFolder: id => { void openFolder(id); },
+  openProject: () => { void openProject().catch(error => report('Could not open project', error)); },
+});
 const queue = new QueueView(message => composer.restoreQueued(message));
 const review = new ReviewCard(() => { showInspector(); inspector.reviewSession(); }, () => inspector.follow('edit'));
 const usage = new UsageMeter(() => { messagesReload.request(); changesReload.request(); reviewReload.request(); });
@@ -114,12 +137,15 @@ function engine(status: EngineStatus): void {
   byId('engine-dot').className = `status-dot ${status.state}`;
   byId('engine-status').textContent = `Engine ${status.state}${status.version ? ` · ${status.version}` : ''} — ${status.detail}`;
   byId('engine-status').title = status.detail;
+  const sidebarEngine = byId('sidebar-engine');
+  sidebarEngine.className = `sidebar-engine ${status.state}`;
+  sidebarEngine.textContent = status.state === 'ready' ? 'Local' : status.state;
+  sidebarEngine.title = `Engine ${status.state} — ${status.detail}`;
   byId('retry-state').hidden = status.state !== 'error' && status.state !== 'stopped';
   inspector.setReady(status.state === 'ready');
   composer.setEngine(status);
   byId<HTMLButtonElement>('new-task').disabled = changingWorkspace || status.state !== 'ready';
   byId<HTMLButtonElement>('tools-button').disabled = !state?.workspace || status.state !== 'ready';
-  byId<HTMLButtonElement>('atlas-button').disabled = !state?.workspace || state.workspace.id === SCRATCH_WORKSPACE_ID || status.state !== 'ready';
   attention.setEnabled(Boolean(state?.workspace) && status.state === 'ready');
 }
 
@@ -147,6 +173,10 @@ function apply(next: AppState): void {
   byId('workspace-button').textContent = scratch ? 'No folder' : next.workspace?.name ?? 'Open project';
   byId('workspace-button').title = next.workspace?.path ?? 'Open or switch local project';
   byId('workspace-path').textContent = next.workspace?.path ?? 'No project open';
+  const light = next.preferences.theme === 'light' || (next.preferences.theme === 'system' && !systemTheme.matches);
+  const themeToggle = byId('theme-toggle');
+  themeToggle.setAttribute('aria-pressed', String(light));
+  themeToggle.title = light ? 'Switch to dark theme' : 'Switch to light theme';
   byId('app-version').textContent = `Relay ${next.version} · ${next.arch}`;
   byId<HTMLButtonElement>('terminal-button').disabled = !next.workspace || changingWorkspace;
   byId('app').classList.toggle('compact-chat', next.preferences.general.conversationDisplay === 'compact');
@@ -258,7 +288,14 @@ async function refreshCommands(): Promise<void> {
 }
 
 // Only one overlay page may be visible at a time (settings/automation/toolkit/attention stack).
-const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.close(); tools.close(); attention.close(); };
+const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.hide(); tools.close(); attention.close(); };
+
+async function toggleTheme(): Promise<void> {
+  if (!state) return;
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  try { apply(await window.relay.savePreferences({ theme: next })); }
+  catch (error) { report('Could not change the theme', error); }
+}
 
 function settings(): void {
   if (!state) { notify('App state is not available yet. Use Refresh to retry.', true); return; }
@@ -410,6 +447,20 @@ function openTools(mode: ToolsMode): void {
   tools.show(mode);
 }
 
+async function openAtlas(target?: AtlasActionTarget): Promise<void> {
+  if (!state?.workspace || state.workspace.id === SCRATCH_WORKSPACE_ID) {
+    notify('Open a project folder to give Atlas code to read.', true);
+    return;
+  }
+  if (target?.workspaceId && state.workspace.id !== target.workspaceId) {
+    const opened = await openFolder(target.workspaceId);
+    if (!opened) return;
+  }
+  closeOverlayPages();
+  pendingAtlasTarget = target ? { sessionId: target.sessionId, create: true } : undefined;
+  tools.show('atlas');
+}
+
 function toggleAttention(): void {
   if (!attention.isOpen) closeOverlayPages();
   attention.toggle();
@@ -443,7 +494,7 @@ function palette(): void {
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
       { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
       { label: 'Scheduled automation', action: openAutomation },
-      { label: 'Atlas — project knowledge', action: () => { closeOverlayPages(); atlas.open(); } },
+      { label: 'Atlas — project knowledge', action: () => { void openAtlas(); } },
       { label: 'Attention — agent requests', action: () => { closeOverlayPages(); attention.show(); } },
       { label: 'Usage & context', action: () => usage.open() },
       { label: 'Compact conversation', action: () => usage.compactNow() },
@@ -545,6 +596,11 @@ document.querySelector('.titlebar')?.addEventListener('dblclick', (event) => {
   void window.relay.zoomWindow();
 });
 bind('refresh-tasks', async () => { await sessions.reload(); requestsReload.request(); attentionReload.request(); messagesReload.request(); });
+bind('workspaces-toggle', () => {
+  const collapsed = sessions.toggleAll();
+  byId('workspaces-toggle').setAttribute('aria-expanded', String(!collapsed));
+});
+bind('theme-toggle', toggleTheme);
 bind('task-menu', () => sessions.menu());
 bind('attention-button', toggleAttention);
 bind('attention-close', () => attention.close());
@@ -553,7 +609,6 @@ bind('search-button', () => search('files'));
 bind('settings-button', settings);
 bind('configure-model', settings);
 bind('automation-button', openAutomation);
-bind('atlas-button', () => { closeOverlayPages(); atlas.open(); });
 bind('tools-button', () => openTools('skills'));
 bind('palette-button', palette);
 bind('terminal-button', () => terminal.open());
@@ -580,7 +635,9 @@ function attachOpenFile(): void {
   }
 }
 
+bind('attach-files', () => composer.pickAttachments());
 wirePlusMenu(byId<HTMLButtonElement>('attach-file'), byId('plus-menu'), () => [
+  { label: 'Attach files…', run: () => composer.pickAttachments() },
   { label: 'Attach open file', hint: 'Editor', run: attachOpenFile },
   { label: 'Add skill', hint: '✦', run: () => composer.pickSkills() },
   { label: 'Tools & agents', hint: '⛭', run: () => composer.pickAgents() },

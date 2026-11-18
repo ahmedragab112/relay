@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseMentionToken, filterMentionables, type MentionSource } from '../src/renderer/mention.js';
+import { atlasMention, parseMentionToken, filterMentionables, type MentionSource } from '../src/renderer/mention.js';
 
 test('parses an @token immediately before the caret', () => {
   assert.deepEqual(parseMentionToken('read @REA', 9), { query: 'REA', start: 5, end: 9 });
@@ -35,4 +35,11 @@ test('an empty query keeps every source in order', () => {
 
 test('filtering is case-insensitive on the name', () => {
   assert.deepEqual(filterMentionables(sources, 'CODE').map(source => source.name), ['Code review']);
+});
+
+test('@atlas offers the Atlas picker while the query matches', () => {
+  assert.equal(atlasMention('atlas')?.kind, 'atlas');
+  assert.equal(atlasMention('ATL')?.name, 'Atlas');
+  assert.equal(atlasMention('re'), undefined, 'an unrelated query hides the Atlas row');
+  assert.equal(atlasMention(''), undefined, 'a bare @ stops at files, skills, and tools');
 });

@@ -20,8 +20,7 @@ function latest(sessions: SessionSummary[]): SessionSummary[] {
   return [...byId.values()];
 }
 
-export function groupTasks(sessions: SessionSummary[], workspaces: Workspace[], currentId?: string): TaskGroup[] {
-  const byPath = new Map(workspaces.map((workspace) => [normalize(workspace.path), workspace]));
+export function groupTasks(sessions: SessionSummary[], workspaces: Workspace[], currentId?: string): TaskGroup[] {  const byPath = new Map(workspaces.map((workspace) => [normalize(workspace.path), workspace]));
   const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
   const groups = new Map<string, TaskGroup>();
   const make = (id: string, name: string, path?: string): TaskGroup => {
@@ -50,4 +49,10 @@ export function groupTasks(sessions: SessionSummary[], workspaces: Workspace[], 
   if (loose && !ordered.includes(loose)) ordered.push(loose);
   for (const group of ordered) group.sessions.sort((left, right) => right.updatedAt - left.updatedAt);
   return ordered;
+}
+
+/** Collapse-all toggle: one collapsed group means the next click opens everything. */
+export function toggleCollapsed(ids: string[], collapsed: ReadonlySet<string>): Set<string> {
+  const anyCollapsed = ids.some((id) => collapsed.has(id));
+  return new Set(anyCollapsed ? [] : ids);
 }

@@ -383,3 +383,75 @@ test('errors fetching a command answer with a failure outcome', async () => {
   assert.match((f.results[0] as { message?: string }).message ?? '', /hiccup/);
   host.dispose();
 });
+
+function transportDrop(): Error {
+  return Object.assign(new Error('Transport: fetch failed'), { name: 'ClientError', reason: 'Transport' });
+}
+
+test('a transport drop on the long attach re-attaches instead of ending the browser', async () => {
+  const f = fakeRpc();
+  const d = fakeDriver();
+  const errors: unknown[] = [];
+  let attempts = 0;
+  f.rpc.attach = (input, options) => {
+    attempts += 1;
+    f.calls.push({ method: 'attach', input, options });
+    return attempts === 1 ? Promise.reject(transportDrop()) : new Promise(() => {});
+  };
+  const host = startBrowserHost({
+    rpc: f.rpc, sessionID: 'ses_1', connectionID: 'mine', location: { directory: WORKSPACE },
+    driver: d.driver, onError: (cause) => errors.push(cause), dispatchTimeoutMs: 100, attachRetryFloorMs: 0,
+  });
+  await flush();
+  assert.equal(attempts, 2, 'the attachment was re-established');
+  assert.deepEqual(errors, []);
+  host.dispose();
+});
+
+test('a fast transport failure on attach is reported once instead of retrying', async () => {
+  const f = fakeRpc();
+  const d = fakeDriver();
+  const errors: unknown[] = [];
+  let attempts = 0;
+  f.rpc.attach = (input, options) => {
+    attempts += 1;
+    f.calls.push({ method: 'attach', input, options });
+    return Promise.reject(transportDrop());
+  };
+  const host = startBrowserHost({
+    rpc: f.rpc, sessionID: 'ses_1', connectionID: 'mine', location: { directory: WORKSPACE },
+    driver: d.driver, onError: (cause) => errors.push(cause), dispatchTimeoutMs: 100,
+  });
+  await flush();
+  assert.equal(attempts, 1);
+  assert.equal(errors.length, 1);
+  host.dispose();
+});
+
+test('an attach refused by the engine is reported without a retry', async () => {
+  const f = fakeRpc();
+  const d = fakeDriver();
+  const errors: unknown[] = [];
+  f.rpc.attach = () => Promise.reject(new Error('Browser permissions could not be granted.'));
+  const host = startBrowserHost({
+    rpc: f.rpc, sessionID: 'ses_1', connectionID: 'mine', location: { directory: WORKSPACE },
+    driver: d.driver, onError: (cause) => errors.push(cause), dispatchTimeoutMs: 100, attachRetryFloorMs: 0,
+  });
+  await flush();
+  assert.equal(errors.length, 1);
+  assert.match((errors[0] as Error).message, /permissions/);
+  host.dispose();
+});
+
+test('the attached control republishes the tab inventory for the new attachment', async () => {
+  const f = fakeRpc();
+  const d = fakeDriver({ listTabs: () => Promise.resolve([summary()]), focusedTabID: () => Promise.resolve(TAB_ID) });
+  const host = startBrowserHost({ rpc: f.rpc, sessionID: 'ses_1', connectionID: 'mine', location: { directory: WORKSPACE }, driver: d.driver, dispatchTimeoutMs: 100 });
+  await flush();
+  const before = f.states.length;
+  f.emit({ type: 'attached', connectionID: 'mine', version: 4 });
+  await flush();
+  assert.equal(f.states.length, before + 1);
+  assert.deepEqual(f.states.at(-1), { tabs: [summary()], focusedTabID: TAB_ID });
+  host.dispose();
+});

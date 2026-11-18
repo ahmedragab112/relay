@@ -247,6 +247,7 @@ function sanitizeSettings(data: StoredSettings): StoredSettings {
       context: sanitizeContext(rawPreferences.context),
       auto: sanitizeAuto(rawPreferences.auto),
       archivedSessions: sanitizeArchived(rawPreferences.archivedSessions),
+      hiddenSessions: sanitizeArchived(rawPreferences.hiddenSessions),
       ...(active ? { activeWorkspaceId: active } : {}),
     },
     workspaces: workspaces.slice(0, 30), providers, mcp, plugins: plugins.slice(0, 50),
@@ -291,7 +292,7 @@ export class SettingsStore {
     preferences: {
       theme: 'dark', defaultModel: '', defaultAccess: 'ask', modelVariant: '',
       dictation: { provider: 'groq', model: 'whisper-large-v3-turbo' },
-      general: { ...generalDefaults }, context: { ...contextDefaults }, auto: { ...autoDefaults }, archivedSessions: [],
+      general: { ...generalDefaults }, context: { ...contextDefaults }, auto: { ...autoDefaults }, archivedSessions: [], hiddenSessions: [],
     },
     workspaces: [], providers: [], mcp: [], plugins: [], reactions: [],
   };
@@ -484,6 +485,18 @@ export class SettingsStore {
 
   async restoreSession(id: string): Promise<void> {
     this.data.preferences.archivedSessions = this.data.preferences.archivedSessions.filter((item) => item !== id);
+    await this.save();
+  }
+
+  /** Records sessions the app keeps on disk but never lists (Atlas builds). */
+  async hideSessions(ids: string[]): Promise<void> {
+    const valid = ids.filter((id) => /^[a-zA-Z0-9_-]{1,256}$/.test(id));
+    if (!valid.length) return;
+    const hidden = this.data.preferences.hiddenSessions;
+    let added = false;
+    for (const id of valid) if (!hidden.includes(id)) { hidden.push(id); added = true; }
+    if (!added) return;
+    this.data.preferences.hiddenSessions = hidden.slice(0, 500);
     await this.save();
   }
 

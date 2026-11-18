@@ -12,6 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { isTransportDrop } from './transport.js';
 
 export interface TabSummary {
   id: string;
@@ -163,6 +164,8 @@ export interface BrowserHostInput {
   onError?: (cause: unknown) => void;
   /** Test hook: how long a dispatch may hang before answering with a timeout failure. */
   dispatchTimeoutMs?: number;
+  /** Test hook: how long an attach must hold before a transport drop counts as a sliced idle connection. */
+  attachRetryFloorMs?: number;
 }
 
 export interface BrowserHost {
@@ -180,6 +183,10 @@ const UNSUPPORTED = new Set([
 ]);
 
 const DEFAULT_DISPATCH_TIMEOUT_MS = 60_000;
+
+// fetch abandons a connection that stays silent for five minutes, and the engine ends the
+// attachment with it. A drop after this long is that cutoff, not a dead engine.
+const ATTACH_RETRY_FLOOR_MS = 60_000;
 
 const NAVIGATION_ACTIONS = new Set(['tabs.open', 'navigate', 'back', 'forward', 'reload']);
 
@@ -334,16 +341,31 @@ export function startBrowserHost(input: BrowserHostInput): BrowserHost {
     if (control.type === 'command') handleCommand(String(control.requestID));
     else if (control.type === 'cancel') {
       if (control.requestID) { cancelled.add(String(control.requestID)); pending.delete(String(control.requestID)); }
+    } else if (control.type === 'attached') {
+      // The engine resets its view of our tabs on every attach; republish so tabIDs validate.
+      void publishState();
     }
-    // `attached` needs no action: attach's own resolution signals closed/replaced.
   }, options);
 
-  const attachPromise = call.attach().then(
-    () => undefined,
-    (cause: unknown) => {
-      if (!disposed) input.onError?.(cause);
-    },
-  );
+  const attachFloor = input.attachRetryFloorMs ?? ATTACH_RETRY_FLOOR_MS;
+  const attachLoop = (async () => {
+    for (;;) {
+      const started = Date.now();
+      try {
+        // Resolving means the engine closed or replaced the attachment on purpose.
+        await call.attach();
+        return;
+      } catch (cause) {
+        if (disposed) return;
+        if (!isTransportDrop(cause) || Date.now() - started < attachFloor) {
+          input.onError?.(cause);
+          return;
+        }
+        // The idle connection was abandoned mid-attach, which the engine treats as closed;
+        // attach again so the agent keeps its browser for the rest of the session.
+      }
+    }
+  })();
   void publishState();
 
   return {
@@ -353,7 +375,7 @@ export function startBrowserHost(input: BrowserHostInput): BrowserHost {
       unsubscribe();
       driver.dispose();
       // Let the engine settle the attachment; nothing depends on the resolution.
-      void attachPromise.catch(() => undefined);
+      void attachLoop.catch(() => undefined);
     },
   };
 }

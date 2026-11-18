@@ -29,7 +29,15 @@ export interface AtlasManifest {
   project: string;
   generatedAt: number;
   baseline?: string;
+  /** What the last build read besides the code: the whole project or one task's conversation. */
+  source?: AtlasSource;
   pages: AtlasPage[];
+}
+
+export interface AtlasSource {
+  kind: 'project' | 'task';
+  /** Title of the task whose conversation grounded the build. */
+  title?: string;
 }
 
 export interface AtlasNote {
@@ -61,6 +69,25 @@ export interface AtlasStatus {
   writing?: number;
   total?: number;
   error?: string;
+}
+
+export interface AtlasProgress {
+  percent: number;
+  phase: string;
+}
+
+/** One 0–100 scale for the whole build: planning, per-page writing, then a full bar when ready. */
+export function atlasProgress(status: AtlasStatus): AtlasProgress | undefined {
+  if (status.state === 'ready') return { percent: 100, phase: 'Atlas is ready' };
+  if (status.state === 'planning') return { percent: 3, phase: 'Planning pages' };
+  if (status.state !== 'writing') return undefined;
+  const written = Math.max(0, status.writing ?? 0);
+  if (!status.total) return { percent: 10, phase: written ? `Writing pages — ${written} done` : 'Writing pages' };
+  const done = Math.min(written, status.total);
+  return {
+    percent: Math.min(95, 10 + Math.round((85 * done) / status.total)),
+    phase: `Writing pages ${done} of ${status.total}`,
+  };
 }
 
 /** One module card: what it is, where it lives, and how it relates to other modules. */
@@ -332,6 +359,25 @@ export function parseAtlasCards(text: string, pages: AtlasPage[]): { cards: Atla
   return { cards, warnings };
 }
 
+export const ATLAS_CONTEXT_LIMIT = 6_000;
+
+/** A compact transcript of a task, kept newest-first within the character budget. */
+export function atlasTaskContext(messages: Array<{ role: string; parts: Array<{ type: string; text?: string }> }>): string {
+  const lines: string[] = [];
+  let total = 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role !== 'user' && message.role !== 'assistant') continue;
+    const text = message.parts.filter((part) => part.type === 'text').map((part) => part.text ?? '').join('\n').trim();
+    if (!text) continue;
+    const line = `${message.role === 'user' ? 'User' : 'Assistant'}: ${text}`;
+    if (total + line.length + 1 > ATLAS_CONTEXT_LIMIT) continue;
+    total += line.length + 1;
+    lines.unshift(line);
+  }
+  return lines.join('\n');
+}
+
 /** The generation prompt; the agent writes plan.json and one Markdown file per page. */
 export function atlasPrompt(input: {
   projectName: string;
@@ -340,6 +386,7 @@ export function atlasPrompt(input: {
   existing?: AtlasPage[];
   protect?: AtlasPage[];
   changed?: string[];
+  context?: string;
 }): string {
   const language = input.language === 'ar' ? 'Arabic' : 'English';
   const plan = input.plan;
@@ -373,6 +420,7 @@ export function atlasPrompt(input: {
     existing,
     protect,
     changed,
+    input.context?.trim() ? `Task context — the conversation behind this request; use it to focus the pages, but ground every claim in code:\n${input.context.trim()}` : '',
     '',
     `Step 3 — write ${ATLAS_ROOT}/${input.language}/plan.json with exactly this shape: {"pages":[{"slug":"kebab-case-id","title":"Page title","parent":"Optional parent slug","summary":"One sentence"}]}. List every page that should stay in Atlas, including pages you did not rewrite.`,
     `Step 4 — for every page you plan to write, write ${ATLAS_ROOT}/${input.language}/<slug>.md. Each page must contain:`,

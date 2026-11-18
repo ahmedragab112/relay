@@ -9,7 +9,8 @@ export type { Language };
 const AR: Record<string, string> = {
   'nav.new-task': 'مهمة جديدة',
   'nav.project': 'افتح مشروعًا',
-  'nav.attention': 'الانتباه',
+  'nav.attention': 'انتباهي',
+  'nav.workspaces': 'مساحات العمل',
   'nav.search': 'بحث',
   'nav.automation': 'الأتمتة',
   'nav.atlas': 'أطلس',
@@ -39,9 +40,10 @@ const AR: Record<string, string> = {
 const EN: Record<string, string> = {
   'nav.new-task': 'New task',
   'nav.project': 'Open project',
-  'nav.attention': 'Attention',
+  'nav.attention': 'My Attention',
+  'nav.workspaces': 'Workspaces',
   'nav.search': 'Search',
-  'nav.automation': 'Automation',
+  'nav.automation': 'Automations',
   'nav.atlas': 'Atlas',
   'atlas.title': 'Atlas',
   'nav.toolkit': 'Toolkit',

@@ -2,7 +2,7 @@
 // these functions only parse the typed token and filter the menu sources so the
 // behavior stays unit-testable.
 
-export type MentionKind = 'file' | 'skill' | 'plugin' | 'agent' | 'connector';
+export type MentionKind = 'file' | 'skill' | 'plugin' | 'agent' | 'connector' | 'atlas';
 
 export interface MentionSource {
   kind: MentionKind;
@@ -43,4 +43,15 @@ export function filterMentionables(sources: MentionSource[], query: string): Men
   const needle = query.trim().toLowerCase();
   if (!needle) return [...sources];
   return sources.filter(source => source.name.toLowerCase().includes(needle));
+}
+
+/**
+ * The @atlas row: it opens the Atlas page/card picker instead of attaching
+ * something directly. It appears only once the typed query points at it, so a
+ * bare `@` stays focused on files, skills, and tools.
+ */
+export function atlasMention(query: string): MentionSource | undefined {
+  const needle = query.trim().toLowerCase();
+  if (!needle || !'atlas'.startsWith(needle)) return undefined;
+  return { kind: 'atlas', id: 'atlas', name: 'Atlas', detail: 'Project knowledge — pages and module cards' };
 }

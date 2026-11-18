@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import type {
-  AccessLevel, AgentMode, AppEvent, AppState, AutomationJob, AutomationState, ContextBlock, McpServer, PermissionDecision, PluginCatalogEntry, PluginView, PreferencesPatch, ProviderInput, RunCommandInput, SendMessageInput,
+  AccessLevel, AgentMode, AppEvent, AppState, AutomationJob, AutomationState, ContextBlock, McpServer, PermissionDecision, PluginCatalogEntry, PluginView, PreferencesPatch, ProviderInput, RunCommandInput, SendMessageInput, StagedAttachment,
 } from '../shared/contracts.js';
 import { SCRATCH_WORKSPACE_ID } from '../shared/contracts.js';
 import { Engine, type EngineBrowserHooks } from './engine.js';
@@ -25,13 +25,15 @@ import { SettingsStore, validateMcp, type SecretCodec } from './settings.js';
 import { SkillLibrary } from './skills.js';
 import { SkillCatalog } from './skills-catalog.js';
 import { WorkspaceFiles } from './workspace.js';
+import { stageAttachment } from './attachments.js';
 import { accentColor, applicationMenu, credentialStoreLabel, windowChrome, windowMaterial, type Platform } from './platform.js';
 import { engineBinaryName } from '../shared/engine-target.js';
 import { startControlServer } from './control.js';
 import { Updates } from './updater.js';
 import { HistoryIndex } from './history.js';
 import { AtlasRunner } from './atlas.js';
-import { isAtlasLanguage, type AtlasLanguage } from '../shared/atlas.js';
+import { isAtlasSession } from './session-visibility.js';
+import { ATLAS_ROOT, isAtlasLanguage, type AtlasLanguage } from '../shared/atlas.js';
 
 let window: BrowserWindow | undefined;
 let store: SettingsStore;
@@ -480,6 +482,26 @@ function register(): void {
     if (mode !== 'files' && mode !== 'content') throw new Error('Invalid search mode.');
     return needFiles().search(text(query, 'Search', 256), mode);
   });
+  define('attachments:pick', async () => {
+    const active = needFiles();
+    const result = await dialog.showOpenDialog(window!, {
+      title: 'Attach files to this message', properties: ['openFile', 'multiSelections'], buttonLabel: 'Attach',
+    });
+    if (result.canceled) return [];
+    const staged: StagedAttachment[] = [];
+    for (const path of result.filePaths.slice(0, 5)) staged.push(await stageAttachment(active.root, { path }));
+    return staged;
+  });
+  define('attachments:stage', (_event, input) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Nothing to attach.');
+    const value = input as Record<string, unknown>;
+    return stageAttachment(needFiles().root, {
+      ...(typeof value.path === 'string' ? { path: text(value.path, 'File path', 4096) } : {}),
+      ...(typeof value.name === 'string' ? { name: text(value.name, 'File name', 256) } : {}),
+      ...(typeof value.text === 'string' ? { text: text(value.text, 'Pasted text', 2 * 1024 * 1024) } : {}),
+      ...(typeof value.data === 'string' ? { data: text(value.data, 'File data', 4 * 1024 * 1024) } : {}),
+    });
+  });
   define('files:read', (_event, path) => needFiles().read(text(path, 'Path', 4096)));
   define('files:save', (_event, path, content, revision) => needFiles().save(text(path, 'Path', 4096), text(content, 'File content', 2 * 1024 * 1024), text(revision, 'Revision', 256)));
   define('preferences:artifact-dir', async () => {
@@ -604,8 +626,22 @@ function register(): void {
   define('atlas:savePage', async (_event, language, slug, body) =>
     atlas.savePage(atlasLanguage(language), text(slug, 'Atlas page', 128), text(body, 'Atlas page', 1024 * 1024)));
   define('atlas:sync', async (_event, language) => atlas.sync(atlasLanguage(language)));
-  define('atlas:generate', async (_event, language) => atlas.generate(atlasLanguage(language)));
+  define('atlas:generate', async (_event, language, sessionId, sourceTitle) =>
+    atlas.generate(
+      atlasLanguage(language),
+      sessionId === undefined || sessionId === null ? undefined : text(sessionId, 'Task', 256),
+      sourceTitle === undefined || sourceTitle === null ? undefined : text(sourceTitle, 'Task title', 200),
+    ));
   define('atlas:cancel', async () => atlas.cancel());
+  define('atlas:reveal', async (_event, language) => {
+    const workspace = store.workspace;
+    if (!workspace || workspace.id === SCRATCH_WORKSPACE_ID) throw new Error('Open a project folder first.');
+    const folder = join(workspace.path, ATLAS_ROOT, atlasLanguage(language));
+    const fallback = join(workspace.path, ATLAS_ROOT);
+    const target = await access(folder).then(() => folder).catch(async () => access(fallback).then(() => fallback).catch(() => workspace.path));
+    const failure = await shell.openPath(target);
+    if (failure) throw new Error(failure || 'The Atlas folder could not be opened.');
+  });
   define('dictation:transcribe', async (_event, value) => {
     const audio = validateAudio(value);
     const target = transcriptionTarget(store.preferences.dictation, store.runtimeProviders());
@@ -688,6 +724,18 @@ async function runScheduledJob(job: AutomationJob): Promise<{ detail: string; se
   return { detail: output ? output.slice(0, 160) : 'Prompt finished with no text output.', sessionId, artifactPath };
 }
 
+/** Older builds listed Atlas runs as tasks; adopt any session still carrying the reserved title. */
+async function hideLegacyAtlasSessions(): Promise<void> {
+  if (engine.status.state !== 'ready') return;
+  try {
+    const legacy = (await engine.listAllSessions()).filter(isAtlasSession).map((item) => item.id);
+    if (!legacy.length) return;
+    engine.hideSessions(legacy);
+    await store.hideSessions(legacy);
+    emit({ type: 'sessions-changed' });
+  } catch { /* the next launch retries */ }
+}
+
 async function boot(): Promise<void> {
   const root = join(app.getPath('userData'), 'relay');
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -710,6 +758,7 @@ async function boot(): Promise<void> {
   await automation.load();
   engineRoot = join(root, 'engine');
   engine = new Engine(engineRoot, engineBinary(), emit, browserHooks());
+  engine.hideSessions(store.preferences.hiddenSessions);
   engine.keepEngineConfig(await terminalEnabled());
   engine.setAutoCompact(store.preferences.context.autoCompact, store.preferences.context.compactThreshold);
   plugins = new PluginManager(join(engineRoot, 'plugins'));
@@ -744,11 +793,16 @@ async function boot(): Promise<void> {
     },
     emit: (projectId, view) => emit({ type: 'atlas', workspaceId: projectId, view }),
     sessionsChanged: () => emit({ type: 'sessions-changed' }),
+    hidden: (sessionId) => {
+      engine.silenceSession(sessionId);
+      void store.hideSessions([sessionId]);
+    },
   });
   register();
   await createWindow();
   scheduler.start();
   await restart();
+  void hideLegacyAtlasSessions();
   if (store.workspace) void history.refresh();
   try {
     await startControlServer({

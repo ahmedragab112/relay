@@ -89,6 +89,8 @@ export interface Preferences {
   context: ContextSettings;
   auto: AutoSettings;
   archivedSessions: string[];
+  /** Sessions the app creates but never shows as tasks (Atlas builds). */
+  hiddenSessions: string[];
   activeWorkspaceId?: string;
 }
 
@@ -127,6 +129,19 @@ export interface UsageSummary {
 export interface DictationInput {
   mime: string;
   data: ArrayBuffer;
+}
+
+export interface StageAttachmentInput {
+  path?: string;
+  name?: string;
+  text?: string;
+  data?: string;
+}
+
+export interface StagedAttachment {
+  path: string;
+  name: string;
+  size: number;
 }
 
 export interface EngineStatus {
@@ -724,7 +739,8 @@ export interface RelayAPI {
   atlasCards(language: AtlasLanguage): Promise<AtlasCard[]>;
   saveAtlasPage(language: AtlasLanguage, slug: string, text: string): Promise<AtlasView>;
   syncAtlas(language: AtlasLanguage): Promise<AtlasView>;
-  generateAtlas(language: AtlasLanguage): Promise<AtlasView>;
+  generateAtlas(language: AtlasLanguage, sessionId?: string, sourceTitle?: string): Promise<AtlasView>;
+  revealAtlas(language: AtlasLanguage): Promise<void>;
   cancelAtlas(): Promise<void>;
   forkSession(id: string, messageId: string): Promise<SessionSummary>;
   renameSession(id: string, title: string): Promise<void>;
@@ -775,6 +791,9 @@ export interface RelayAPI {
   undoChange(path: string): Promise<'restored' | 'deleted'>;
   listFiles(path?: string): Promise<FileEntry[]>;
   searchFiles(query: string, mode: SearchMode): Promise<FileSearchResult[]>;
+  pickAttachments(): Promise<StagedAttachment[]>;
+  stageAttachment(input: StageAttachmentInput): Promise<StagedAttachment>;
+  filePath(file: File): string;
   searchHistory(query: string): Promise<HistoryHit[]>;
   readFile(path: string): Promise<FileDocument>;
   saveFile(path: string, content: string, revision: string): Promise<FileDocument>;

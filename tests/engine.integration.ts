@@ -41,6 +41,7 @@ test('real pinned engine persists sessions, enforces approvals and streams a wor
     await engine.renameSession(session.id, 'Renamed task');
     assert.equal((await engine.listSessions())[0].title, 'Renamed task');
     assert.deepEqual(await engine.getMessages(session.id), []);
+    await engine.waitForIdle(session.id);
     const pending = await engine.client.permission.create({ sessionID: session.id, action: 'shell', resources: ['printf test'], agent: 'build' });
     assert.equal(pending.effect, 'ask');
     await waitFor(async () => (await engine.listPermissions()).length === 1);
@@ -58,6 +59,42 @@ test('real pinned engine persists sessions, enforces approvals and streams a wor
     assert.equal((await engine.listSessions())[0].title, 'Renamed task');
     await engine.deleteSession(session.id);
     assert.deepEqual(await engine.listSessions(), []);
+  } finally {
+    await engine.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('silent sessions approve their own permissions and stay out of attention', { timeout: 90_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-engine-'));
+  const workspace = join(root, 'project');
+  await mkdir(workspace);
+  await writeFile(join(workspace, 'example.txt'), 'hello');
+  const events: AppEvent[] = [];
+  const engine = new Engine(join(root, 'engine'), resolve('node_modules/@opencode/cli/bin/opencode.exe'), (event) => events.push(event));
+  try {
+    await engine.start(workspace, [], []);
+    const replies: Array<{ requestID: string; decision: string }> = [];
+    const permissionClient = engine.client.permission;
+    const originalReply = permissionClient.reply.bind(permissionClient);
+    permissionClient.reply = async (input: Parameters<typeof originalReply>[0]) => {
+      replies.push({ requestID: input.requestID, decision: input.decision });
+      return originalReply(input);
+    };
+    const silent = await engine.createSession('Atlas run');
+    engine.silenceSession(silent.id);
+    const pending = await engine.client.permission.create({ sessionID: silent.id, action: 'shell', resources: ['printf silent'], agent: 'build' });
+    assert.equal(pending.effect, 'ask');
+    await waitFor(() => replies.length === 1);
+    assert.equal(replies[0].requestID, pending.id);
+    assert.equal(replies[0].decision, 'once');
+    assert.equal((await engine.listPermissions()).length, 0);
+    assert.equal((await engine.listAttention()).permissions.length, 0);
+    assert.equal(events.some((event) => event.type === 'permission'), false);
+    const visible = await engine.createSession('Visible task');
+    await engine.client.permission.create({ sessionID: visible.id, action: 'shell', resources: ['printf visible'], agent: 'build' });
+    await waitFor(async () => (await engine.listPermissions()).some((item) => item.sessionId === visible.id));
+    assert.ok(events.some((event) => event.type === 'permission' && event.request.sessionId === visible.id));
   } finally {
     await engine.stop();
     await rm(root, { recursive: true, force: true });

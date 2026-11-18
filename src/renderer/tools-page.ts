@@ -10,14 +10,17 @@ import { showSkillPreview } from './skill-install';
 import { externalURL } from './state';
 import { searchTasksAndProjects } from './toolkit-search';
 
-export type ToolsMode = 'skills' | 'plugins' | 'connectors';
+export type ToolsMode = 'skills' | 'plugins' | 'connectors' | 'atlas';
 
 export interface ToolsPageOptions {
   openTask: (id: string) => void;
   openFolder: (id: string) => void | Promise<void>;
+  atlasOpen: () => void;
+  atlasRefresh: () => void;
+  atlasClose: () => void;
 }
 
-const MODES: ToolsMode[] = ['skills', 'plugins', 'connectors'];
+const MODES: ToolsMode[] = ['skills', 'plugins', 'connectors', 'atlas'];
 
 function capabilitySummary({ commands, skills, agents, mcp, code }: PluginCapabilities): string {
   const parts: string[] = [];
@@ -57,7 +60,10 @@ export class ToolsPage {
     skills: byId<HTMLButtonElement>('tools-tab-skills'),
     plugins: byId<HTMLButtonElement>('tools-tab-plugins'),
     connectors: byId<HTMLButtonElement>('tools-tab-connectors'),
+    atlas: byId<HTMLButtonElement>('tools-tab-atlas'),
   };
+  private toolbar = byId('tools-toolbar');
+  private atlasPanel = byId('atlas-panel');
   private mode: ToolsMode = 'skills';
   private open = false;
   private busy = false;
@@ -97,7 +103,7 @@ export class ToolsPage {
       else this.editServer();
     });
     this.fromFile.addEventListener('click', () => void this.installZip());
-    byId('tools-refresh').addEventListener('click', () => void this.reload());
+    byId('tools-refresh').addEventListener('click', () => { if (this.mode === 'atlas') this.options.atlasRefresh(); else void this.reload(); });
     byId('tools-close').addEventListener('click', () => this.close());
   }
 
@@ -115,10 +121,11 @@ export class ToolsPage {
     byId('app').classList.add('tools-open');
     this.pressed();
     this.paintChrome();
+    this.paintPanels();
     this.render();
-    void this.reload();
+    this.refreshContent();
     this.syncStatusPolling();
-    this.search.focus();
+    if (mode !== 'atlas') this.search.focus();
   }
 
   close(): void {
@@ -126,6 +133,8 @@ export class ToolsPage {
     this.open = false;
     this.generation++;
     this.page.hidden = true;
+    this.atlasPanel.hidden = true;
+    this.options.atlasClose();
     byId('app').classList.remove('tools-open');
     this.syncStatusPolling();
     this.pressed();
@@ -136,9 +145,25 @@ export class ToolsPage {
     this.mode = mode;
     this.filter = 'All';
     this.paintChrome();
+    this.paintPanels();
     this.render();
+    this.refreshContent();
     this.syncStatusPolling();
-    this.search.focus();
+    if (mode !== 'atlas') this.search.focus();
+  }
+
+  private paintPanels(): void {
+    const atlas = this.mode === 'atlas';
+    this.toolbar.hidden = atlas;
+    this.body.hidden = atlas;
+    this.atlasPanel.hidden = !atlas;
+    this.fromFile.hidden = atlas || this.mode !== 'plugins';
+    byId('tools-refresh').setAttribute('title', atlas ? 'Refresh Atlas' : 'Refresh list');
+  }
+
+  private refreshContent(): void {
+    if (this.mode === 'atlas') this.options.atlasOpen();
+    else void this.reload();
   }
 
   // Connector health is live while the Connectors tab is on screen: the engine
@@ -175,7 +200,7 @@ export class ToolsPage {
   }
 
   async reload(): Promise<void> {
-    if (!this.open) return;
+    if (!this.open || this.mode === 'atlas') return;
     const token = ++this.generation;
     try {
       const [skills, library, catalog, plugins, connectors, connectorsCatalog, connectorStatuses, sessions, state] = await Promise.all([
@@ -215,21 +240,24 @@ export class ToolsPage {
   }
 
   private paintChrome(): void {
-    this.title.textContent = 'Toolkit';
+    this.title.textContent = this.mode === 'atlas' ? 'Atlas' : 'Toolkit';
     this.search.placeholder = 'Search tasks, projects, skills, plugins, and connectors';
     this.secondary.textContent = this.mode === 'skills' ? 'Add skill from web…' : this.mode === 'plugins' ? 'Import plugin from web…' : 'Add server';
     this.fromFile.hidden = this.mode !== 'plugins';
-    this.summary.textContent = this.mode === 'skills'
-      ? `${this.library.length} installed · ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'} bundled with Relay`
-      : this.mode === 'plugins'
-        ? `${this.plugins.length} installed · ${this.catalog.length} plugin pack${this.catalog.length === 1 ? '' : 's'} bundled with Relay`
-        : `${this.connectors.filter((server) => server.enabled).length} enabled · ${this.connectors.length} connector${this.connectors.length === 1 ? '' : 's'} configured`;
+    this.summary.textContent = this.mode === 'atlas'
+      ? 'Project knowledge, written by the agent and kept inside this project.'
+      : this.mode === 'skills'
+        ? `${this.library.length} installed · ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'} bundled with Relay`
+        : this.mode === 'plugins'
+          ? `${this.plugins.length} installed · ${this.catalog.length} plugin pack${this.catalog.length === 1 ? '' : 's'} bundled with Relay`
+          : `${this.connectors.filter((server) => server.enabled).length} enabled · ${this.connectors.length} connector${this.connectors.length === 1 ? '' : 's'} configured`;
     this.paintChips();
     this.paintPrimary();
     this.pressed();
   }
 
   private paintChips(): void {
+    if (this.mode === 'atlas') { this.chips.replaceChildren(); return; }
     const items = this.mode === 'skills'
       ? ['All', ...new Set(this.skills.map((entry) => entry.category))]
       : this.mode === 'plugins'
@@ -250,6 +278,8 @@ export class ToolsPage {
   }
 
   private paintPrimary(): void {
+    if (this.mode === 'atlas') { this.primary.hidden = true; this.secondary.hidden = true; return; }
+    this.secondary.hidden = false;
     const remaining = this.remaining();
     this.primary.hidden = remaining === 0;
     this.primary.disabled = this.busy;
@@ -286,6 +316,7 @@ export class ToolsPage {
   }
 
   private render(): void {
+    if (this.mode === 'atlas') return;
     this.body.replaceChildren(...this.searchSections(), ...this.sections());
     this.paintPrimary();
   }

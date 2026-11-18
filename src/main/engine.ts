@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants, type Dirent } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { access, chmod, mkdir, open, readdir, realpath, readFile, unlink, writeFile } from 'node:fs/promises';
-import { basename, isAbsolute, join, posix, resolve, win32 } from 'node:path';
+import { basename, extname, isAbsolute, join, posix, resolve, win32 } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { OpenCode, type JobSubagent, type OpenCodeClient, type FormInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
 import type { AccessLevel, AgentMode, AgentOption, AppEvent, AttentionOverview, AttentionRequest, BackgroundRun, ChatMessage, CommandOption, ContextBlock, FileChange, McpRuntimeStatus, McpServer, ModelOption, PermissionDecision, PermissionRequest, ProviderInput, QueuedMessage, RunCommandInput, SendMessageInput, SessionActivity, SessionSummary, SkillOption, SkillRegistryEntry, UsageSummary, AutoSettings } from '../shared/contracts.js';
@@ -21,8 +21,14 @@ import { loadAtlasIndex } from './atlas-index.js';
 import { summarizeUsage } from './usage.js';
 import { mapStreamEvent } from './streaming.js';
 import { defaultShell } from './platform.js';
+import { visibleSessions } from './session-visibility.js';
+import { isTransportDrop } from './transport.js';
 
 const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+// fetch abandons a connection that has sent no response headers after five minutes (undici's
+// headersTimeout), so any long poll gets a fresh request well before that cutoff.
+const IDLE_WAIT_SLICE_MS = 4 * 60 * 1000;
 
 // These arrive many times per second and never change the persisted transcript on their own.
 const LIVE_ONLY = new Set(['session.tool.progress', 'session.tool.input.delta', 'session.step.streamed']);
@@ -77,6 +83,14 @@ export interface AttachmentFile {
   source: { type: 'inline' };
 }
 
+const IMAGE_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp',
+};
+
+export function attachmentMime(path: string): string | undefined {
+  return IMAGE_MIME[extname(path).slice(1).toLowerCase()];
+}
+
 export async function readAttachment(root: string, path: string): Promise<AttachmentFile> {
   if (!path || path.includes('\0') || isAbsolute(path)) throw new Error('Attachments must be files inside the open project.');
   const rootPath = await realpath(root);
@@ -91,7 +105,9 @@ export async function readAttachment(root: string, path: string): Promise<Attach
     if (info.size > MAX_ATTACHMENT_BYTES) throw new Error('Attachments must be smaller than 2 MB.');
     const contents = await handle.readFile();
     if (contents.byteLength > MAX_ATTACHMENT_BYTES) throw new Error('Attachments must be smaller than 2 MB.');
-    return { uri: pathToFileURL(actual).href, data: contents.toString('base64'), mime: 'text/plain', name: basename(actual), source: { type: 'inline' } };
+    const mime = attachmentMime(actual);
+    if (!mime && contents.includes(0)) throw new Error('Only text and image files can be attached. This file looks binary.');
+    return { uri: pathToFileURL(actual).href, data: contents.toString('base64'), mime: mime ?? 'text/plain', name: basename(actual), source: { type: 'inline' } };
   } finally {
     await handle.close();
   }
@@ -225,6 +241,10 @@ export class Engine {
   private autoSessions = new Map<string, { settings?: AutoSettings; tried: Set<string>; current?: string }>();
   // Sessions created but not yet prompted: their first message carries the Atlas index.
   private freshSessions = new Map<string, string>();
+  // Atlas build sessions are not chats; every listing filters them out.
+  private hiddenSessions = new Set<string>();
+  // Hidden runs that also answer their own approvals and questions instead of surfacing them.
+  private silentSessions = new Set<string>();
   // Model id -> epoch ms when the provider said the model works again.
   private modelLimits = new Map<string, number>();
 
@@ -397,9 +417,30 @@ export class Engine {
     if (stream) { this.emit(stream); return; }
     const data = event.data as Record<string, unknown> | undefined;
     if (!data) return;
-    if (event.type === 'permission.asked') { const request = mapPermission(data as never); this.permissions.set(request.id, request); this.emit({ type: 'permission', request }); return; }
-    if (event.type === 'permission.replied') { const id = String(data.requestID); this.permissions.delete(id); this.emit({ type: 'permission-resolved', id }); this.sessionChanged(String(data.sessionID)); return; }
-    if (event.type === 'form.created') { const form = (data as { form: FormInfo }).form; if (form) this.emit({ type: 'question', request: mapQuestion(form) }); return; }
+    if (event.type === 'permission.asked') {
+      const request = mapPermission(data as never);
+      if (this.silentSessions.has(request.sessionId)) {
+        void this.client.permission.reply({ sessionID: request.sessionId, requestID: request.id, decision: 'once' }).catch(() => {});
+        return;
+      }
+      this.permissions.set(request.id, request); this.emit({ type: 'permission', request }); return;
+    }
+    if (event.type === 'permission.replied') {
+      const id = String(data.requestID);
+      const sessionId = String(data.sessionID);
+      if (this.silentSessions.has(sessionId)) return;
+      this.permissions.delete(id); this.emit({ type: 'permission-resolved', id }); this.sessionChanged(sessionId); return;
+    }
+    if (event.type === 'form.created') {
+      const form = (data as { form: FormInfo }).form;
+      if (!form) return;
+      if (this.silentSessions.has(form.sessionID)) {
+        // An invisible run cannot answer a person, and an unanswered form would stall it.
+        void this.client.session.form.cancel({ sessionID: form.sessionID, formID: form.id }).catch(() => {});
+        return;
+      }
+      this.emit({ type: 'question', request: mapQuestion(form) }); return;
+    }
     if (event.type === 'form.replied' || event.type === 'form.cancelled') { this.emit({ type: 'question-resolved', id: String(data.formID) }); return; }
     if (event.type === 'session.idle' && typeof data.sessionID === 'string') {
       this.autoSessions.delete(String(data.sessionID));
@@ -429,10 +470,18 @@ export class Engine {
     return [...new Set([this.directory, ...this.workspaces])].filter(Boolean);
   }
 
+  hideSession(id: string): void { this.hiddenSessions.add(id); }
+
+  hideSessions(ids: string[]): void { for (const id of ids) this.hiddenSessions.add(id); }
+
+  /** A build the user never sees as a chat: hidden from lists and answers its own approvals. */
+  silenceSession(id: string): void { this.hiddenSessions.add(id); this.silentSessions.add(id); }
+
   async listSessions(): Promise<SessionSummary[]> {
     const running = await this.running();
     const result = await this.client.session.list({ directory: this.directory, limit: 100, order: 'desc' });
-    return result.data.filter((session) => !session.parentID && !session.time.archived).map((session) => mapSession(session, running.has(session.id)));
+    return visibleSessions(result.data.filter((session) => !session.parentID && !session.time.archived), this.hiddenSessions)
+      .map((session) => mapSession(session, running.has(session.id)));
   }
 
   async listAllSessions(): Promise<SessionSummary[]> {
@@ -446,7 +495,7 @@ export class Engine {
     for (const page of pages) for (const session of page.data) {
       if (!session.parentID && !session.time.archived) sessions.set(session.id, session);
     }
-    return [...sessions.values()]
+    return visibleSessions([...sessions.values()], this.hiddenSessions)
       .sort((left, right) => right.time.updated - left.time.updated)
       .map((session) => mapSession(session, running.has(session.id)));
   }
@@ -460,11 +509,13 @@ export class Engine {
       ]);
       return { directory, permissions, forms };
     }));
-    const overview = annotateAttention(
-      located.flatMap(({ directory, permissions }) => permissions.map((request) => ({ directory, request: mapPermission(request) }))),
-      located.flatMap(({ directory, forms }) => forms.map((request) => ({ directory, request: mapQuestion(request) }))),
-      sessions,
-    );
+    const permissions = located
+      .flatMap(({ directory, permissions }) => permissions.map((request) => ({ directory, request: mapPermission(request) })))
+      .filter(({ request }) => !this.silentSessions.has(request.sessionId));
+    const forms = located
+      .flatMap(({ directory, forms }) => forms.map((request) => ({ directory, request: mapQuestion(request) })))
+      .filter(({ request }) => !this.silentSessions.has(request.sessionId));
+    const overview = annotateAttention(permissions, forms, sessions);
     const log = this.attentionLog();
     let history = overview.history;
     try {
@@ -564,7 +615,20 @@ export class Engine {
   }
 
   async waitForIdle(sessionID: string): Promise<void> {
-    await this.client.experimental.session.wait({ sessionID });
+    const client = this.client;
+    for (;;) {
+      if (this.stopped || this.client !== client) throw new Error('The local engine stopped while waiting for the run to finish.');
+      try {
+        await client.experimental.session.wait({ sessionID }, { signal: AbortSignal.timeout(IDLE_WAIT_SLICE_MS) });
+        return;
+      } catch (error) {
+        if (this.stopped || this.client !== client) throw error;
+        if (!isTransportDrop(error)) throw error;
+        // The wait holds a silent connection until the session idles; fetch abandons such a
+        // connection after five minutes, so a longer build resumes the wait instead of failing.
+        await client.server.info({ signal: AbortSignal.timeout(10_000) }).catch(() => { throw error; });
+      }
+    }
   }
 
   setAutoCompact(enabled: boolean, threshold: number): void {
@@ -791,7 +855,7 @@ export class Engine {
   async listPermissions(): Promise<PermissionRequest[]> {
     const result = await this.client.permission.request.list({ location: { directory: this.directory } });
     this.permissions = new Map(result.data.map((request) => [request.id, mapPermission(request)]));
-    return [...this.permissions.values()];
+    return [...this.permissions.values()].filter((request) => !this.silentSessions.has(request.sessionId));
   }
 
   async replyPermission(id: string, decision: PermissionDecision): Promise<void> {
@@ -817,7 +881,9 @@ export class Engine {
 
   async listQuestions(): Promise<import('../shared/contracts.js').AgentQuestion[]> {
     const result = await this.client.form.list({ location: { directory: this.directory } });
-    return result.data.map(mapQuestion);
+    return result.data
+      .filter((form) => !this.silentSessions.has(form.sessionID))
+      .map(mapQuestion);
   }
 
   async answerQuestion(id: string, answers: string[][] | null): Promise<void> {
