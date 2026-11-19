@@ -22,6 +22,8 @@ console.log('Building main process');
 await bundle({ ...shared, entryPoints: [join(root, 'src/main/index.ts')], outfile: join(root, 'dist/main/index.cjs') });
 console.log('Building preload bridge');
 await bundle({ ...shared, entryPoints: [join(root, 'src/preload/index.ts')], outfile: join(root, 'dist/preload/index.cjs') });
+console.log('Building export encoder');
+await bundle({ ...shared, entryPoints: [join(root, 'src/preload/export.ts')], outfile: join(root, 'dist/preload/export.cjs') });
 
 console.log('Building relayctl');
 const relayctl = join(root, 'dist', 'relayctl.mjs');

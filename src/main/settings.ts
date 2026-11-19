@@ -500,6 +500,16 @@ export class SettingsStore {
     await this.save();
   }
 
+  /** Brings sessions back into every task list, e.g. design tasks after an upgrade. */
+  async showSessions(ids: string[]): Promise<void> {
+    const set = new Set(ids);
+    const hidden = this.data.preferences.hiddenSessions;
+    const next = hidden.filter((id) => !set.has(id));
+    if (next.length === hidden.length) return;
+    this.data.preferences.hiddenSessions = next;
+    await this.save();
+  }
+
   async saveProvider(input: ProviderInput): Promise<void> {
     const provider = validateProvider(input);
     const existing = this.data.providers.find(item => item.id === provider.id);

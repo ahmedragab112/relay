@@ -1,5 +1,7 @@
 import type { SessionSummary, Workspace } from '../shared/contracts';
 import { SCRATCH_WORKSPACE_ID } from '../shared/contracts';
+import { DESIGN_TITLE_PREFIX, isDesignSession } from '../shared/design';
+import { MOTION_TITLE_PREFIX, isMotionSession } from '../shared/motion';
 import { byId, button, el, errorText } from './dom';
 import { askText, confirmAction, dialog } from './dialog';
 import { fileIconElement } from './file-icons';
@@ -9,6 +11,21 @@ import { forkForest, type ForkNode } from './fork-graph';
 const DOT_CENTER = 15;
 const LANE_GAP = 14;
 const LANE_LEFT = 10;
+
+export interface ArtifactTaskActions {
+  open(sessionId: string): void;
+  reveal(sessionId: string): Promise<void>;
+  remove(sessionId: string): Promise<void>;
+}
+
+type ArtifactKind = 'design' | 'motion';
+
+/** A task that belongs to a sandbox artifact rather than a chat, with its short name. */
+function artifactTask(session: { title: string }): { kind: ArtifactKind; name: string } | undefined {
+  if (isDesignSession(session)) return { kind: 'design', name: session.title.slice(DESIGN_TITLE_PREFIX.length) };
+  if (isMotionSession(session)) return { kind: 'motion', name: session.title.slice(MOTION_TITLE_PREFIX.length) };
+  return undefined;
+}
 
 function taskLoader(): HTMLElement {
   const loader = el('span', 'task-loader');
@@ -69,6 +86,51 @@ function branchGlyph(): SVGSVGElement {
 }
 
 
+function motionGlyph(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '11');
+  svg.setAttribute('height', '11');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  for (const [tag, attrs] of [
+    ['circle', { cx: '12', cy: '12', r: '8.5' }],
+    ['path', { d: 'M10 8.6l5.4 3.4-5.4 3.4z' }],
+  ] as Array<[string, Record<string, string>]>) {
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attrs)) shape.setAttribute(key, value);
+    svg.append(shape);
+  }
+  return svg;
+}
+
+function designGlyph(): SVGSVGElement {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('width', '11');
+  svg.setAttribute('height', '11');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '1.8');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  for (const [tag, attrs] of [
+    ['rect', { x: '3.5', y: '4.5', width: '17', height: '15', rx: '2.5' }],
+    ['path', { d: 'M3.5 9.5h17M9.5 9.5V19.5' }],
+  ] as Array<[string, Record<string, string>]>) {
+    const shape = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const [key, value] of Object.entries(attrs)) shape.setAttribute(key, value);
+    svg.append(shape);
+  }
+  return svg;
+}
+
+
 export class Sessions {
   items: SessionSummary[] = [];
   groups: TaskGroup[] = [];
@@ -92,6 +154,7 @@ export class Sessions {
     private onRevert: () => void = () => {},
     private waiting: (sessionId: string) => boolean = () => false,
     private atlas: (target: AtlasActionTarget) => void = () => {},
+    private artifactTasks: ArtifactTaskActions = { open: () => {}, reveal: async () => {}, remove: async () => {} },
   ) {}
 
   private static skeleton(): HTMLElement {
@@ -124,9 +187,10 @@ export class Sessions {
       this.items = [...items].sort((a, b) => (this.order.get(b.id) ?? 0) - (this.order.get(a.id) ?? 0));
       this.groups = groupTasks(this.items, this.workspaces, this.currentId);
       const wanted = this.queued || this.active?.id;
+      const userInitiated = Boolean(this.queued);
       this.queued = '';
       this.active = this.items.find(item => item.id === wanted) ?? this.groups[0]?.sessions[0];
-      this.render(); this.selected(this.active);
+      this.render(); this.selected(this.active, userInitiated);
     } catch (error) {
       if (generation !== this.generation || request !== this.request || this.disposed) return;
       this.signature = '';
@@ -196,6 +260,8 @@ export class Sessions {
   menu(): void {
     const session = this.active;
     if (!session) return;
+    const artifact = artifactTask(session);
+    if (artifact) { this.artifactMenu(session, artifact.kind, artifact.name); return; }
     const generation = this.generation;
     const modal = dialog('Task');
     modal.add(el('p', '', session.title));
@@ -245,6 +311,37 @@ export class Sessions {
       } catch (error) { modal.fail(error); }
       finally { modal.busy(false); }
     }, 'button danger'));
+  }
+
+  /** Artifact tasks are backed by a sandbox; they open their page instead of a chat menu. */
+  private artifactMenu(session: SessionSummary, kind: ArtifactKind, name: string): void {
+    const generation = this.generation;
+    const label = kind === 'motion' ? 'motion' : 'design';
+    const modal = dialog(`${kind === 'motion' ? 'Motion' : 'Design'} task`);
+    modal.add(el('p', '', name));
+    modal.add(
+      button(`Open ${label}`, () => { modal.root.close(); this.artifactTasks.open(session.id); }),
+      button('Show folder', async () => {
+        modal.busy(true);
+        try { await this.artifactTasks.reveal(session.id); modal.root.close(); }
+        catch (error) { modal.fail(error); }
+        finally { modal.busy(false); }
+      }),
+      button(`Delete ${label}`, async () => {
+        if (!await confirmAction(`Delete ${label}?`, `Delete “${name}” with its versions and its task? Files outside .relay/${label} are not touched.`, `Delete ${label}`)) return;
+        modal.busy(true);
+        try {
+          await this.artifactTasks.remove(session.id);
+          modal.root.close();
+          if (generation === this.generation) {
+            this.items = this.items.filter(item => item.id !== session.id);
+            if (this.active?.id === session.id) this.active = undefined;
+            await this.reload();
+          }
+        } catch (error) { modal.fail(error); }
+        finally { modal.busy(false); }
+      }, 'button danger'),
+    );
   }
 
   private regroup(): void {
@@ -383,7 +480,11 @@ export class Sessions {
     const state = blocked ? 'Waiting for you' : session.status === 'running' ? 'Running' : session.status === 'error' ? 'Error' : 'Idle';
     const parentTitle = session.fork ? titles.get(session.fork.sessionId) ?? 'an earlier task' : '';
     const meta = parentTitle ? `⑂ ${parentTitle}${state === 'Idle' ? '' : ` · ${state}`}` : state;
-    copy.append(el('span', 'task-name', session.title), el('span', `task-time${blocked ? ' waiting' : ''}`, `${meta}${when ? ` · ${when}` : ''}`));
+    const name = el('span', 'task-name');
+    const artifact = artifactTask(session);
+    if (artifact) name.append(artifact.kind === 'motion' ? motionGlyph() : designGlyph());
+    name.append(document.createTextNode(artifact ? artifact.name : session.title));
+    copy.append(name, el('span', `task-time${blocked ? ' waiting' : ''}`, `${meta}${when ? ` · ${when}` : ''}`));
     control.append(copy);
     if (branches) {
       const badge = el('span', 'task-branch-count');

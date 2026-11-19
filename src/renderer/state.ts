@@ -41,7 +41,12 @@ export function parsePatch(patch: string): Array<{ kind: 'meta' | 'hunk' | 'adde
 }
 
 export function shouldDismissAttention(previousSessionId: string, nextSessionId: string, userInitiated: boolean): boolean {
-  return userInitiated || previousSessionId !== nextSessionId;
+  return userInitiated || (previousSessionId !== '' && previousSessionId !== nextSessionId);
+}
+
+/** Identifies the exact content a preview is showing, so view refreshes don't reload it. */
+export function previewKey(design: { slug: string; updatedAt: number; versions: number } | undefined): string {
+  return design ? `${design.slug}:${design.updatedAt}:${design.versions}` : '';
 }
 
 // The composer steps aside while the agent waits on an approval or an answer, so the

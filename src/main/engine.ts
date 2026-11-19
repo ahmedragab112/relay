@@ -474,6 +474,8 @@ export class Engine {
 
   hideSessions(ids: string[]): void { for (const id of ids) this.hiddenSessions.add(id); }
 
+  showSessions(ids: string[]): void { for (const id of ids) this.hiddenSessions.delete(id); }
+
   /** A build the user never sees as a chat: hidden from lists and answers its own approvals. */
   silenceSession(id: string): void { this.hiddenSessions.add(id); this.silentSessions.add(id); }
 

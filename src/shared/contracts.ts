@@ -1,5 +1,7 @@
 import type { ConfigurableProviderID } from './providers';
 import type { AtlasCard, AtlasLanguage, AtlasView } from './atlas';
+import type { DesignSystem, DesignVersion, DesignView } from './design';
+import type { MotionStage, MotionVersion, MotionView } from './motion';
 
 export type { UpdatePhase, UpdateStatus, UpdateSignal } from './updates';
 import type { UpdateStatus } from './updates';
@@ -722,6 +724,9 @@ export type AppEvent =
   | { type: 'agent-open-page'; url: string }
   | { type: 'auto-switched'; sessionId: string; model: string; detail: string }
   | { type: 'atlas'; workspaceId: string; view: AtlasView }
+  | { type: 'design'; workspaceId: string; view: DesignView }
+  | { type: 'motion'; workspaceId: string; view: MotionView }
+  | { type: 'motion-export'; workspaceId: string; slug: string; status: 'running' | 'done' | 'failed'; progress: number; file?: string; message?: string }
   | { type: 'update'; status: UpdateStatus }
   | { type: 'error'; message: string };
 
@@ -742,6 +747,32 @@ export interface RelayAPI {
   generateAtlas(language: AtlasLanguage, sessionId?: string, sourceTitle?: string): Promise<AtlasView>;
   revealAtlas(language: AtlasLanguage): Promise<void>;
   cancelAtlas(): Promise<void>;
+  designView(): Promise<DesignView>;
+  designCreate(name: string): Promise<DesignView>;
+  designSend(slug: string, text: string): Promise<{ sessionId: string }>;
+  designSnapshot(slug: string): Promise<DesignView>;
+  designVersions(slug: string): Promise<DesignVersion[]>;
+  designRestore(slug: string, version: number): Promise<DesignView>;
+  designSetModel(slug: string, model: string): Promise<DesignView>;
+  saveDesignSystem(system: DesignSystem): Promise<DesignView>;
+  designImplement(slug: string): Promise<{ sessionId: string }>;
+  designReveal(slug: string): Promise<void>;
+  designCancel(slug: string): Promise<void>;
+  designForSession(sessionId: string): Promise<string | undefined>;
+  designDelete(slug: string): Promise<DesignView>;
+  motionView(): Promise<MotionView>;
+  motionCreate(name: string): Promise<MotionView>;
+  motionSend(slug: string, text: string): Promise<{ sessionId: string }>;
+  motionSnapshot(slug: string): Promise<MotionView>;
+  motionVersions(slug: string): Promise<MotionVersion[]>;
+  motionRestore(slug: string, version: number): Promise<MotionView>;
+  motionSetModel(slug: string, model: string): Promise<MotionView>;
+  motionSetStage(slug: string, stage: MotionStage): Promise<MotionView>;
+  motionReveal(slug: string): Promise<void>;
+  motionCancel(slug: string): Promise<void>;
+  motionForSession(sessionId: string): Promise<string | undefined>;
+  motionDelete(slug: string): Promise<MotionView>;
+  motionExport(slug: string): Promise<{ file: string; frames: number }>;
   forkSession(id: string, messageId: string): Promise<SessionSummary>;
   renameSession(id: string, title: string): Promise<void>;
   deleteSession(id: string): Promise<void>;

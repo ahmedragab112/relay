@@ -13,6 +13,8 @@ import { RequestView } from './requests';
 import { Sessions, type AtlasActionTarget } from './sessions';
 import { BranchBar } from './branch-bar';
 import { AttentionView } from './attention';
+import { DesignPage } from './design-page';
+import { MotionPage } from './motion-page';
 import { ToolsPage, type ToolsMode } from './tools-page';
 import { playChime } from './chime';
 import { TerminalView } from './terminal';
@@ -75,10 +77,28 @@ const composer = new Composer(() => {
   return Boolean(provider && (provider.hasKey || providerPreset(preferences.provider)?.keyless));
 });
 const sessions = new Sessions(selectSession, openFolder, () => reviewReload.request(), id => requests.pendingFor(id) > 0,
-  target => { void openAtlas(target); });
+  target => { void openAtlas(target); }, {
+    open: id => { void openArtifactTask(id); },
+    reveal: async id => {
+      const slug = await window.relay.designForSession(id);
+      if (slug) { await window.relay.designReveal(slug); return; }
+      const motionSlug = await window.relay.motionForSession(id);
+      if (!motionSlug) throw new Error('This task is not linked to a design or motion.');
+      await window.relay.motionReveal(motionSlug);
+    },
+    remove: async id => {
+      const slug = await window.relay.designForSession(id);
+      if (slug) { design.consume(await window.relay.designDelete(slug)); return; }
+      const motionSlug = await window.relay.motionForSession(id);
+      if (!motionSlug) throw new Error('This task is not linked to a design or motion.');
+      motion.consume(await window.relay.motionDelete(motionSlug));
+    },
+  });
 const scope = new ScopeChip(id => switchScope(id), () => switchScope('choose'));
 const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
+const design = new DesignPage({ openTask: id => sessions.open(id), deleted: () => sessionsReload.request() });
+const motion = new MotionPage({ openTask: id => sessions.open(id), deleted: () => sessionsReload.request() });
 let pendingAtlasTarget: AtlasTarget | undefined;
 const tools = new ToolsPage({
   openTask: openSession,
@@ -147,6 +167,9 @@ function engine(status: EngineStatus): void {
   byId<HTMLButtonElement>('new-task').disabled = changingWorkspace || status.state !== 'ready';
   byId<HTMLButtonElement>('tools-button').disabled = !state?.workspace || status.state !== 'ready';
   attention.setEnabled(Boolean(state?.workspace) && status.state === 'ready');
+  const artifacts = Boolean(state?.workspace) && state?.workspace?.id !== SCRATCH_WORKSPACE_ID && status.state === 'ready';
+  design.setEnabled(artifacts);
+  motion.setEnabled(artifacts);
 }
 
 function applyPlatform(next: AppState): void {
@@ -187,6 +210,8 @@ function apply(next: AppState): void {
   requests.setSkipUnanswered(next.preferences.general.skipUnansweredQuestions);
   applyLanguage(next.preferences.general.language);
   appearance(); engine(next.engine);
+  design.refreshMode();
+  motion.refreshMode();
   composer.setPreferences(next.preferences);
   if (!initialized || previousWorkspace !== next.workspace?.id) {
     initialized = true;
@@ -195,6 +220,8 @@ function apply(next: AppState): void {
     queue.select('');
     requests.clear(); inspector.setWorkspace(next.workspace?.id ?? '');
     atlas.setWorkspace(next.workspace && next.workspace.id !== SCRATCH_WORKSPACE_ID ? next.workspace.id : undefined);
+    design.setWorkspace(next.workspace && next.workspace.id !== SCRATCH_WORKSPACE_ID ? next.workspace.id : undefined);
+    motion.setWorkspace(next.workspace && next.workspace.id !== SCRATCH_WORKSPACE_ID ? next.workspace.id : undefined);
     usage.setSession(''); review.setSession('');
     sessions.reset(!!next.workspace, next.workspaces, next.workspace?.id);
     if (next.workspace && next.engine.state === 'ready') {
@@ -225,6 +252,9 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
   const nextId = session?.id ?? '';
   const changed = selectedId !== nextId;
   if (userInitiated) closeOverlayPages();
+  if (userInitiated && session) void openArtifactTask(session.id);
+  // Automatic selection changes only reset the cross-task pages; the Design page
+  // follows its own view updates and should not close under the user's cursor.
   if (shouldDismissAttention(selectedId, nextId, userInitiated)) { attention.close(); tools.close(); }
   selectedId = nextId;
   selectedSession = session;
@@ -288,7 +318,7 @@ async function refreshCommands(): Promise<void> {
 }
 
 // Only one overlay page may be visible at a time (settings/automation/toolkit/attention stack).
-const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.hide(); tools.close(); attention.close(); };
+const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.hide(); tools.close(); attention.close(); design.close(); motion.close(); };
 
 async function toggleTheme(): Promise<void> {
   if (!state) return;
@@ -300,7 +330,9 @@ async function toggleTheme(): Promise<void> {
 function settings(): void {
   if (!state) { notify('App state is not available yet. Use Refresh to retry.', true); return; }
   closeOverlayPages();
-  showSettings(() => state!, apply, refreshModels);
+  showSettings(() => state!, apply, refreshModels, {
+    openToolkit: (mode) => { closeOverlayPages(); tools.show(mode); },
+  });
 }
 
 async function newTask(): Promise<void> {
@@ -423,6 +455,20 @@ function search(mode: SearchMode): void {
 
 function openSession(id: string): void { sessions.open(id); }
 
+/** A design or motion task opens its studio; ordinary tasks fall through to the chat. */
+async function openArtifactTask(sessionId: string): Promise<void> {
+  try {
+    const slug = await window.relay.designForSession(sessionId);
+    if (slug) { closeOverlayPages(); design.openAt(slug); return; }
+    const motionSlug = await window.relay.motionForSession(sessionId);
+    if (!motionSlug) return;
+    closeOverlayPages();
+    motion.openAt(motionSlug);
+  } catch (error) {
+    report('Could not open the design task', error);
+  }
+}
+
 function searchTasks(): void {
   showTaskSearch(hit => {
     if (!sessions.items.some(item => item.id === hit.sessionId)) void sessions.reload().then(() => sessions.open(hit.sessionId));
@@ -466,6 +512,16 @@ function toggleAttention(): void {
   attention.toggle();
 }
 
+function toggleDesign(): void {
+  if (!design.isOpen) closeOverlayPages();
+  design.toggle();
+}
+
+function openMotion(): void {
+  closeOverlayPages();
+  motion.toggle();
+}
+
 function openAutomation(): void {
   closeOverlayPages();
   showAutomation(async id => {
@@ -496,6 +552,8 @@ function palette(): void {
       { label: 'Scheduled automation', action: openAutomation },
       { label: 'Atlas — project knowledge', action: () => { void openAtlas(); } },
       { label: 'Attention — agent requests', action: () => { closeOverlayPages(); attention.show(); } },
+      { label: 'Design — pages for this project', action: () => { closeOverlayPages(); design.toggle(); } },
+      { label: 'Motion — animated scenes for this project', action: openMotion },
       { label: 'Usage & context', action: () => usage.open() },
       { label: 'Compact conversation', action: () => usage.compactNow() },
       ...sessions.items.map(session => ({ label: `Task: ${session.title}`, action: () => sessions.open(session.id) })));
@@ -525,6 +583,17 @@ function event(event: AppEvent): void {
   } else if (event.type === 'error') report('Engine reported an error', event.message);
   if (changingWorkspace) return;
   requests.event(event);
+  if (event.type === 'design') { if (event.workspaceId === state?.workspace?.id) design.consume(event.view); }
+  else if (event.type === 'motion') { if (event.workspaceId === state?.workspace?.id) motion.consume(event.view); }
+  else if (event.type === 'motion-export') {
+    if (event.workspaceId !== state?.workspace?.id) return;
+    if (event.status === 'running') motion.noteExport(event.progress);
+    else if (event.status === 'failed' && event.message) notify(`Export failed: ${event.message}`, true);
+  }
+  else if (event.type === 'session-changed' || event.type === 'session-idle') {
+    design.noteSession(event.sessionId, event.type === 'session-idle');
+    motion.noteSession(event.sessionId, event.type === 'session-idle');
+  }
   const attentionEvent = event.type === 'permission' || event.type === 'permission-resolved' || event.type === 'question' || event.type === 'question-resolved';
   if (attentionEvent || (attention.isOpen && (event.type === 'session-idle' || event.type === 'session-changed' || event.type === 'sessions-changed'))) attentionReload.request();
   if (attentionEvent) sessionsRefresh.request();
@@ -604,6 +673,10 @@ bind('theme-toggle', toggleTheme);
 bind('task-menu', () => sessions.menu());
 bind('attention-button', toggleAttention);
 bind('attention-close', () => attention.close());
+bind('design-button', toggleDesign);
+bind('design-close', () => design.close());
+bind('design-tile-motion', openMotion);
+bind('motion-close', () => motion.close());
 bind('attention-refresh', () => attention.reload());
 bind('search-button', () => search('files'));
 bind('settings-button', settings);
@@ -667,6 +740,11 @@ function keydown(event: KeyboardEvent): void {
   if (event.key === 'Escape' && !document.querySelector('dialog[open]')) {
     if (tools.isOpen) { event.preventDefault(); tools.close(); return; }
     if (attention.isOpen) { event.preventDefault(); attention.close(); return; }
+    if (design.isOpen) {
+      event.preventDefault();
+      if (design.inWorkspace) design.back(); else design.close();
+      return;
+    }
   }
   if (!(event.metaKey || event.ctrlKey) || event.isComposing || document.querySelector('dialog[open]')) return;
   const key = event.key.toLowerCase();

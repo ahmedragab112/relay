@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, safeStorage, session, shell, systemPreferences, type IpcMainInvokeEvent, type Session, type WebContents } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, net, Notification, protocol, safeStorage, session, shell, systemPreferences, type IpcMainInvokeEvent, type Session, type WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { Browser } from '@opencode/plugin-browser/rpc';
 import { access, mkdir, rm, writeFile } from 'node:fs/promises';
@@ -32,6 +32,10 @@ import { startControlServer } from './control.js';
 import { Updates } from './updater.js';
 import { HistoryIndex } from './history.js';
 import { AtlasRunner } from './atlas.js';
+import { designSessionIds, Designs } from './design.js';
+import { Motions } from './motion.js';
+import { exportMotion } from './motion-export.js';
+import { motionStage } from '../shared/motion.js';
 import { isAtlasSession } from './session-visibility.js';
 import { ATLAS_ROOT, isAtlasLanguage, type AtlasLanguage } from '../shared/atlas.js';
 
@@ -46,6 +50,9 @@ let scheduler: Scheduler;
 let updates: Updates;
 let history: HistoryIndex;
 let atlas: AtlasRunner;
+let designs: Designs;
+let motions: Motions;
+let exportingMotion = false;
 let historyTimer: NodeJS.Timeout | undefined;
 let historyPendingFull = false;
 let historyPendingSession: string | undefined;
@@ -131,6 +138,12 @@ function bundledSkillCatalog(): SkillCatalog {
 
 const BROWSER_PARTITION = 'persist:relay-browser';
 
+// Design previews load from a private scheme, sandboxed away from the app origin.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'relay-design', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+  { scheme: 'relay-motion', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+]);
+
 function browserURL(value: string): boolean {
   try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:'; }
   catch { return false; }
@@ -155,7 +168,11 @@ function prepareBrowserSession(): void {
 function emit(event: AppEvent): void {
   observeHistory(event);
   let delivered: AppEvent = event;
-  if (event.type === 'session-idle') delivered = finishEvent(event);
+  if (event.type === 'session-idle') {
+    delivered = finishEvent(event);
+    if (designs) void designs.noteIdle(event.sessionId);
+    if (motions) void motions.noteIdle(event.sessionId);
+  }
   else if (event.type === 'permission' || event.type === 'question') requestNotify(event);
   if (window && !window.isDestroyed()) window.webContents.send('app:event', delivered);
 }
@@ -642,6 +659,83 @@ function register(): void {
     const failure = await shell.openPath(target);
     if (failure) throw new Error(failure || 'The Atlas folder could not be opened.');
   });
+  define('design:view', async () => designs.view());
+  define('design:create', async (_event, name) => designs.create(text(name, 'Design name', 80)));
+  define('design:send', async (_event, slug, body) =>
+    designs.send(text(slug, 'Design', 64), text(body, 'Design request', 8000)));
+  define('design:snapshot', async (_event, slug) => designs.snapshotNow(text(slug, 'Design', 64)));
+  define('design:versions', async (_event, slug) => designs.versions(text(slug, 'Design', 64)));
+  define('design:restore', async (_event, slug, version) => {
+    const number = Number(version);
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error('That version is not valid.');
+    return designs.restore(text(slug, 'Design', 64), number);
+  });
+  define('design:set-model', async (_event, slug, model) =>
+    designs.setModel(text(slug, 'Design', 64), typeof model === 'string' ? model.slice(0, 512) : ''));
+  define('design:save-system', async (_event, system) => designs.saveSystem(system));
+  define('design:implement', async (_event, slug) => designs.implement(text(slug, 'Design', 64)));
+  define('design:reveal', async (_event, slug) => {
+    const folder = await designs.reveal(text(slug, 'Design', 64));
+    const failure = await shell.openPath(folder);
+    if (failure) throw new Error(failure || 'The design folder could not be opened.');
+  });
+  define('design:cancel', async (_event, slug) => designs.cancel(text(slug, 'Design', 64)));
+  define('design:forSession', async (_event, id) => designs.slugForSession(text(id, 'Task', 256)));
+  define('design:delete', async (_event, slug) => designs.remove(text(slug, 'Design', 64)));
+  define('motion:view', async () => motions.view());
+  define('motion:create', async (_event, name) => motions.create(text(name, 'Motion name', 80)));
+  define('motion:send', async (_event, slug, body) =>
+    motions.send(text(slug, 'Motion', 64), text(body, 'Motion request', 8000)));
+  define('motion:snapshot', async (_event, slug) => motions.snapshotNow(text(slug, 'Motion', 64)));
+  define('motion:versions', async (_event, slug) => motions.versions(text(slug, 'Motion', 64)));
+  define('motion:restore', async (_event, slug, version) => {
+    const number = Number(version);
+    if (!Number.isSafeInteger(number) || number < 1) throw new Error('That version is not valid.');
+    return motions.restore(text(slug, 'Motion', 64), number);
+  });
+  define('motion:set-model', async (_event, slug, model) =>
+    motions.setModel(text(slug, 'Motion', 64), typeof model === 'string' ? model.slice(0, 512) : ''));
+  define('motion:set-stage', async (_event, slug, stage) =>
+    motions.setStage(text(slug, 'Motion', 64), motionStage(stage)));
+  define('motion:reveal', async (_event, slug) => {
+    const folder = await motions.reveal(text(slug, 'Motion', 64));
+    const failure = await shell.openPath(folder);
+    if (failure) throw new Error(failure || 'The motion folder could not be opened.');
+  });
+  define('motion:cancel', async (_event, slug) => motions.cancel(text(slug, 'Motion', 64)));
+  define('motion:forSession', async (_event, id) => motions.slugForSession(text(id, 'Task', 256)));
+  define('motion:delete', async (_event, slug) => motions.remove(text(slug, 'Motion', 64)));
+  define('motion:export', async (_event, slug) => {
+    if (exportingMotion) throw new Error('An export is already running. Wait for it to finish.');
+    const plan = await motions.exportPlan(text(slug, 'Motion', 64));
+    const workspaceId = store.workspace?.id ?? '';
+    const progress = (status: 'running' | 'done' | 'failed', percent: number, extra: { file?: string; message?: string } = {}) =>
+      emit({ type: 'motion-export', workspaceId, slug: plan.slug, status, progress: percent, ...extra });
+    exportingMotion = true;
+    try {
+      progress('running', 0);
+      let last = -1;
+      const result = await exportMotion({
+        ...plan,
+        preload: join(__dirname, '../preload/export.cjs'),
+        onProgress: (done, total) => {
+          const percent = Math.floor((done / total) * 100);
+          if (percent === last) return;
+          last = percent;
+          progress('running', percent);
+        },
+      });
+      progress('done', 100, { file: result.file });
+      shell.showItemInFolder(result.file);
+      return { file: result.file, frames: result.frames };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      progress('failed', 0, { message });
+      throw error;
+    } finally {
+      exportingMotion = false;
+    }
+  });
   define('dictation:transcribe', async (_event, value) => {
     const audio = validateAudio(value);
     const target = transcriptionTarget(store.preferences.dictation, store.runtimeProviders());
@@ -736,6 +830,19 @@ async function hideLegacyAtlasSessions(): Promise<void> {
   } catch { /* the next launch retries */ }
 }
 
+/** Older builds hid design sessions; designs are tasks now, so bring them back once. */
+async function showDesignSessions(): Promise<void> {
+  if (engine.status.state !== 'ready') return;
+  try {
+    const ids: string[] = [];
+    for (const workspace of store.workspaces) ids.push(...await designSessionIds(workspace.path).catch(() => []));
+    if (!ids.length) return;
+    engine.showSessions(ids);
+    await store.showSessions(ids);
+    emit({ type: 'sessions-changed' });
+  } catch { /* the next launch retries */ }
+}
+
 async function boot(): Promise<void> {
   const root = join(app.getPath('userData'), 'relay');
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -798,11 +905,60 @@ async function boot(): Promise<void> {
       void store.hideSessions([sessionId]);
     },
   });
+  designs = new Designs({
+    project: () => {
+      const active = store.workspace;
+      return active && active.id !== SCRATCH_WORKSPACE_ID ? { id: active.id, name: active.name, path: active.path } : undefined;
+    },
+    engine: () => needEngine(),
+    model: () => {
+      const model = store.preferences.defaultModel;
+      return { model, auto: !model, autoSettings: store.preferences.auto };
+    },
+    access: () => store.preferences.defaultAccess,
+    emit: (projectId, view) => emit({ type: 'design', workspaceId: projectId, view }),
+    sessionsChanged: () => emit({ type: 'sessions-changed' }),
+    show: (sessionId) => {
+      engine.showSessions([sessionId]);
+      void store.showSessions([sessionId]);
+    },
+  });
+  motions = new Motions({
+    project: () => {
+      const active = store.workspace;
+      return active && active.id !== SCRATCH_WORKSPACE_ID ? { id: active.id, name: active.name, path: active.path } : undefined;
+    },
+    engine: () => needEngine(),
+    model: () => {
+      const model = store.preferences.defaultModel;
+      return { model, auto: !model, autoSettings: store.preferences.auto };
+    },
+    access: () => store.preferences.defaultAccess,
+    emit: (projectId, view) => emit({ type: 'motion', workspaceId: projectId, view }),
+    sessionsChanged: () => emit({ type: 'sessions-changed' }),
+    show: (sessionId) => {
+      engine.showSessions([sessionId]);
+      void store.showSessions([sessionId]);
+    },
+  });
+  protocol.handle('relay-design', async (request) => {
+    const file = await designs.preview(request.url).catch(() => undefined);
+    if (!file) return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+    const body = typeof file.body === 'string' ? file.body : new Uint8Array(file.body);
+    return new Response(body, { headers: { 'content-type': file.type, 'cache-control': 'no-store' } });
+  });
+  protocol.handle('relay-motion', async (request) => {
+    const file = await motions.preview(request.url).catch(() => undefined);
+    if (!file) return new Response('Not found', { status: 404, headers: { 'content-type': 'text/plain' } });
+    const body = typeof file.body === 'string' ? file.body : new Uint8Array(file.body);
+    return new Response(body, { headers: { 'content-type': file.type, 'cache-control': 'no-store' } });
+  });
   register();
   await createWindow();
   scheduler.start();
   await restart();
   void hideLegacyAtlasSessions();
+  void showDesignSessions();
   if (store.workspace) void history.refresh();
   try {
     await startControlServer({

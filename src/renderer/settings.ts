@@ -1,16 +1,26 @@
-import type { Accent, AppState, GeneralSettings, Layout, ModelOption, PreferencesPatch, ProviderInput, SessionSummary, Theme, UpdateStatus } from '../shared/contracts';
+import type {
+  Accent, AppState, CatalogSkillEntry, CommandOption, GeneralSettings, Layout, McpRuntimeStatus, McpServer, ModelOption, PluginCatalogEntry,
+  PluginCapabilities, PluginView, PreferencesPatch, ProviderInput, SessionSummary, SkillLibraryEntry, Theme, UpdateStatus,
+} from '../shared/contracts';
 import { CONFIGURABLE_PROVIDERS, providerName, providerPreset, type ConfigurableProviderID } from '../shared/providers';
-import { byId, button, el, errorText, field, option, report } from './dom';
+import { byId, button, el, errorText, field, notify, option, report } from './dom';
 import { confirmAction } from './dialog';
 import { applyLanguage } from './i18n';
 import { resetLabel } from '../shared/limits';
+import { catalogIconElement, connectorIcon, pluginIcon, skillIcon } from './catalog-icons';
 
 const groupLabel: Record<string, string> = { free: 'Free', local: 'Local', paid: 'Paid', custom: 'Custom' };
-type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'archive' | 'about';
+type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'extensions' | 'archive' | 'about';
+type ExtensionMode = 'plugins' | 'skills' | 'connectors';
+
+export interface SettingsOptions {
+  openToolkit: (mode: ExtensionMode) => void;
+}
 
 const navigation: Array<{ group: string; items: Array<{ id: Category; label: string }> }> = [
   { group: 'Relay', items: [{ id: 'general', label: 'General' }, { id: 'appearance', label: 'Appearance' }, { id: 'context', label: 'Context & usage' }, { id: 'auto', label: 'Auto model' }] },
   { group: 'Connect', items: [{ id: 'voice', label: 'Voice dictation' }, { id: 'providers', label: 'Model providers' }] },
+  { group: 'Extensions', items: [{ id: 'extensions', label: 'Extension management' }] },
   { group: 'Data', items: [{ id: 'archive', label: 'Archived tasks' }, { id: 'about', label: 'About Relay' }] },
 ];
 
@@ -26,7 +36,8 @@ export function closeSettings(): void {
   byId('settings-button').focus();
 }
 
-export function showSettings(getState: () => AppState, apply: (state: AppState) => void, refreshModels: () => Promise<void>): void {
+export function showSettings(getState: () => AppState, apply: (state: AppState) => void, refreshModels: () => Promise<void>, options: SettingsOptions): void {
+  const openToolkit = options.openToolkit;
   const page = byId('settings-page');
   if (!settingsWired) {
     settingsWired = true;
@@ -652,7 +663,173 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     pane.append(section('About Relay', rows, el('p', 'settings-note', 'Relay is a local-first agent workspace. Conversations, settings, and provider keys stay on this Mac; provider requests go through the local OpenCode engine.')));
   };
 
-  const builders: Record<Category, () => void> = { general, appearance, context, auto, voice, providers, archive, about };
+  const extensions = (): void => {
+    const top = el('div', 'settings-field-row');
+    const topCopy = el('div', 'settings-copy');
+    topCopy.append(
+      el('strong', '', 'Extensions on this device'),
+      el('small', '', 'Manage Plugins, Commands, Skills, and Connectors installed on this device. Changes here apply to every project on this Mac.'),
+    );
+    const topActions = el('div', 'settings-inline');
+    topActions.append(button('Open Toolkit', () => openToolkit('plugins'), 'button primary'));
+    top.append(topCopy, topActions);
+    pane.append(top);
+
+    const extSection = (title: string, note: string, action: { label: string; mode: ExtensionMode } | null) => {
+      const block = el('section', 'settings-section');
+      const head = el('div', 'settings-field-row');
+      const copy = el('div', 'settings-copy');
+      const heading = el('h3', 'settings-ext-heading', title);
+      copy.append(heading, el('small', '', note));
+      const actions = el('div', 'settings-inline');
+      if (action) actions.append(button(action.label, () => openToolkit(action.mode), 'button'));
+      head.append(copy, actions);
+      const list = el('div', 'settings-ext-list');
+      list.append(el('p', 'small muted', 'Loading…'));
+      block.append(head, list);
+      pane.append(block);
+      return { heading, list };
+    };
+
+    const extRow = (icon: HTMLElement, title: string, meta: string, actions: HTMLElement[]): HTMLElement => {
+      const row = el('div', 'settings-ext-row');
+      const tile = el('span', 'discovery-tile');
+      tile.append(icon);
+      const copy = el('div', 'settings-copy');
+      copy.append(el('strong', '', title), el('small', '', meta));
+      const controls = el('div', 'settings-inline');
+      controls.append(...actions);
+      row.append(tile, copy, controls);
+      return row;
+    };
+
+    const capabilityText = (capabilities: PluginCapabilities): string => {
+      const parts: string[] = [];
+      if (capabilities.commands.length) parts.push(`${capabilities.commands.length} command${capabilities.commands.length === 1 ? '' : 's'}`);
+      if (capabilities.skills.length) parts.push(`${capabilities.skills.length} skill${capabilities.skills.length === 1 ? '' : 's'}`);
+      if (capabilities.mcp.length) parts.push(`${capabilities.mcp.length} MCP server${capabilities.mcp.length === 1 ? '' : 's'}`);
+      return parts.join(' · ');
+    };
+
+    const pluginSection = extSection('Plugins', 'Plugin packs add slash commands to every task. Enable, update, or remove them here.', { label: 'Create plugin', mode: 'plugins' });
+    const commandSection = extSection('Commands', 'Slash commands the agent can run right now. Commands come from installed plugins and skills.', { label: 'Manage plugins', mode: 'plugins' });
+    const skillSection = extSection('Skills', 'Skills the agent can load in any project. Removing one never touches your project files.', { label: 'Create skill', mode: 'skills' });
+    const connectorSection = extSection('Connectors', 'MCP servers that give the agent extra tools. Every change is confirmed by the app.', { label: 'Create connector', mode: 'connectors' });
+
+    const load = async (): Promise<void> => {
+      const [pluginViews, pluginCatalog, skillCatalog, skillLibrary, servers, commandList, statuses] = await Promise.all([
+        window.relay.listPlugins().catch(() => [] as PluginView[]),
+        window.relay.listPluginCatalog().catch(() => [] as PluginCatalogEntry[]),
+        window.relay.listCatalogSkills().catch(() => [] as CatalogSkillEntry[]),
+        window.relay.listLibrarySkills().catch(() => [] as SkillLibraryEntry[]),
+        window.relay.listMcp().catch(() => [] as McpServer[]),
+        window.relay.listCommands().catch(() => null as CommandOption[] | null),
+        window.relay.connectorStatus().catch(() => [] as McpRuntimeStatus[]),
+      ]);
+      if (!pane.isConnected) return;
+
+      pluginSection.heading.textContent = `Plugins · ${pluginViews.length}`;
+      pluginSection.list.replaceChildren();
+      if (!pluginViews.length) pluginSection.list.append(el('p', 'small muted', 'No plugins installed. Create one in the Toolkit.'));
+      for (const plugin of pluginViews) {
+        const pack = pluginCatalog.find((entry) => entry.id === plugin.id);
+        const outdated = Boolean(pack && (pack.version !== plugin.version || (pack.digest && pack.digest !== plugin.digest)));
+        const actions: HTMLElement[] = [];
+        if (outdated) {
+          actions.push(button('Update', async () => {
+            try {
+              const preview = await window.relay.previewCatalogPlugin(plugin.id);
+              if (preview.capabilities.code.length) throw new Error('This package ships executable code, which Relay does not activate.');
+              await window.relay.installPlugin(preview.token, false);
+              notify(`Updated ${plugin.name}.`);
+              show('extensions');
+            } catch (error) { report(`Could not update ${plugin.name}`, error); }
+          }, 'button primary'));
+        }
+        actions.push(button(plugin.enabled ? 'Disable' : 'Enable', async () => {
+          try {
+            await window.relay.setPluginEnabled(plugin.id, !plugin.enabled);
+            show('extensions');
+          } catch (error) { report(`Could not update ${plugin.name}`, error); }
+        }, 'text-button'));
+        actions.push(button('Remove', async () => {
+          if (!await confirmAction('Remove plugin?', `“${plugin.name}” and its commands will be deleted from Relay. Your project files are not changed.`, 'Remove plugin')) return;
+          try {
+            await window.relay.removePlugin(plugin.id);
+            notify(`Removed ${plugin.name}.`);
+            show('extensions');
+          } catch (error) { report(`Could not remove ${plugin.name}`, error); }
+        }, 'text-button danger'));
+        const meta = [`v${plugin.version}`, plugin.enabled ? 'Enabled' : 'Disabled', plugin.available ? '' : 'Files missing', capabilityText(plugin.capabilities)]
+          .filter(Boolean).join(' · ');
+        pluginSection.list.append(extRow(catalogIconElement(pluginIcon(plugin.name)), plugin.name, meta, actions));
+      }
+
+      commandSection.heading.textContent = `Commands · ${commandList?.length ?? 0}`;
+      commandSection.list.replaceChildren();
+      if (!commandList) commandSection.list.append(el('p', 'small muted', 'The engine is not running, so commands cannot be listed right now.'));
+      else if (!commandList.length) commandSection.list.append(el('p', 'small muted', 'No commands yet. Install a plugin or skill to add some.'));
+      else for (const command of commandList) {
+        commandSection.list.append(extRow(catalogIconElement({ kind: 'code', color: '#519aba' }), `/${command.name}`, command.description || 'No description', []));
+      }
+
+      skillSection.heading.textContent = `Skills · ${skillLibrary.length}`;
+      skillSection.list.replaceChildren();
+      if (!skillLibrary.length) skillSection.list.append(el('p', 'small muted', 'No skills installed. Create one in the Toolkit.'));
+      for (const skill of skillLibrary) {
+        const category = skillCatalog.find((entry) => entry.id === skill.id)?.category ?? '';
+        const installed = new Date(skill.installedAt);
+        const meta = [category, `${skill.files} file${skill.files === 1 ? '' : 's'}`, Number.isNaN(installed.getTime()) ? '' : `installed ${installed.toLocaleDateString()}`]
+          .filter(Boolean).join(' · ');
+        skillSection.list.append(extRow(catalogIconElement(skillIcon(category)), skill.name, meta, [
+          button('Remove', async () => {
+            if (!await confirmAction('Remove skill?', `“${skill.name}” will no longer be available to the agent in any project. Your project files are not changed.`, 'Remove skill')) return;
+            try {
+              await window.relay.removeSkill(skill.id);
+              notify(`Removed ${skill.name}.`);
+              show('extensions');
+            } catch (error) { report(`Could not remove ${skill.name}`, error); }
+          }, 'text-button danger'),
+        ]));
+      }
+
+      connectorSection.heading.textContent = `Connectors · ${servers.length}`;
+      connectorSection.list.replaceChildren();
+      if (!servers.length) connectorSection.list.append(el('p', 'small muted', 'No connectors configured. Create one in the Toolkit.'));
+      for (const server of servers) {
+        const status = statuses.find((entry) => entry.name === server.name);
+        const statusText = !server.enabled ? 'Disabled'
+          : status ? (status.status === 'connected' ? 'Connected' : status.status === 'pending' ? 'Connecting…' : status.status === 'disabled' ? 'Off' : 'Failed') : 'Enabled';
+        const meta = [server.type === 'local' ? 'Local' : 'Remote', statusText, status?.error ?? ''].filter(Boolean).join(' · ');
+        const actions: HTMLElement[] = [];
+        if (status?.status === 'failed') {
+          actions.push(button('Retry', async () => {
+            try { await window.relay.connectConnector(server.name); show('extensions'); }
+            catch (error) { report(`Could not reconnect ${server.name}`, error); }
+          }, 'text-button'));
+        }
+        actions.push(button('Edit', () => openToolkit('connectors'), 'text-button'));
+        actions.push(button(server.enabled ? 'Disable' : 'Enable', async () => {
+          try {
+            await window.relay.saveMcp({ ...server, enabled: !server.enabled });
+            show('extensions');
+          } catch (error) { report(`Could not update ${server.name}`, error); }
+        }, 'text-button'));
+        actions.push(button('Remove', async () => {
+          if (!await confirmAction('Remove connector?', `“${server.name}” will no longer provide tools to the agent. Your project files are not changed.`, 'Remove connector')) return;
+          try {
+            await window.relay.removeMcp(server.name);
+            notify(`Removed ${server.name}.`);
+            show('extensions');
+          } catch (error) { report(`Could not remove ${server.name}`, error); }
+        }, 'text-button danger'));
+        connectorSection.list.append(extRow(catalogIconElement(connectorIcon(server.name, server.type)), server.name, meta, actions));
+      }
+    };
+    void load();
+  };
+
+  const builders: Record<Category, () => void> = { general, appearance, context, auto, voice, providers, extensions, archive, about };
 
   const show = (category: Category): void => {
     active = category;
@@ -673,6 +850,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     auto: ['<path d="M12 4l1.4 3.6L17 9l-3.6 1.4L12 14l-1.4-3.6L7 9l3.6-1.4L12 4z"/>', '<path d="M18.2 13.5l.6 1.6 1.6.6-1.6.6-.6 1.6-.6-1.6-1.6-.6 1.6-.6.6-1.6z"/>'],
     voice: ['<rect x="9" y="3" width="6" height="11" rx="3"/>', '<path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/>'],
     providers: ['<path d="M9 4v5M15 4v5M7 9h10v3a5 5 0 0 1-10 0V9zM12 17v3"/>'],
+    extensions: ['<path d="M10 4.5h1.6a1.9 1.9 0 1 1 3.8 0H17a1 1 0 0 1 1 1v2.6a1.9 1.9 0 1 0 0 3.8V15a1 1 0 0 1-1 1h-2.6a1.9 1.9 0 1 1-3.8 0H8a1 1 0 0 1-1-1v-2.6a1.9 1.9 0 1 0 0-3.8V5.5a1 1 0 0 1 1-1h2z"/>'],
     archive: ['<rect x="4" y="5" width="16" height="5" rx="1.5"/>', '<path d="M6 10v7a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-7M10.5 13.5h3"/>'],
     about: ['<circle cx="12" cy="12" r="8.5"/>', '<path d="M12 11v5"/>', '<circle cx="12" cy="8.2" r=".6" fill="currentColor" stroke="none"/>'],
   };

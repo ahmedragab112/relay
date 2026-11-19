@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; font-src 'self' data:; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; font-src 'self' data:; img-src 'self' data:; frame-src relay-design: relay-motion:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="dark light">
   <title>Relay</title>
 </head>
@@ -36,6 +36,7 @@
       <nav class="sidebar-primary" aria-label="Primary">
         <button id="new-task" class="nav-button new-task" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5.5v13"/><path d="M5.5 12h13"/></svg></span><span class="nav-label" data-i18n="nav.new-task">New task</span><kbd data-shortcut="Mod+N">⌘ N</kbd></button>
         <button id="attention-button" class="nav-button" aria-pressed="false" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 15.5V11a6 6 0 1 0-12 0v4.5l-1.5 2h15z"/><path d="M10 20a2 2 0 0 0 4 0"/></svg></span><span class="nav-label" data-i18n="nav.attention">Attention</span><span id="attention-count" class="attention-count" hidden>0</span></button>
+        <button id="design-button" class="nav-button" aria-pressed="false" disabled><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v13H4z"/><path d="M4 9.5h16"/><path d="M9 9.5v9"/><path d="M12.5 12.5h4.5"/><path d="M12.5 15.5h3"/></svg></span><span class="nav-label" data-i18n="nav.design">Design</span></button>
         <button id="search-button" class="nav-button"><span class="nav-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m15.6 15.6 4.4 4.4"/></svg></span><span class="nav-label" data-i18n="nav.search">Search</span><kbd data-shortcut="Mod+P">⌘ P</kbd></button>
       </nav>
       <div class="workspaces-head">
@@ -135,6 +136,157 @@
         <button id="attention-tab-history" class="attention-tab" role="tab" aria-selected="false" aria-controls="attention-list">History</button>
       </div>
       <div id="attention-list" class="attention-list" aria-live="polite"></div>
+    </section>
+    <section id="design" class="design" aria-label="Design" hidden>
+      <header class="design-head">
+        <button id="design-back" class="icon-button design-back" aria-label="Back to all designs" title="Back to all designs" hidden>←</button>
+        <div class="design-copy">
+          <h2 id="design-title" data-i18n="design.title">Design</h2>
+          <p id="design-summary" class="design-summary" data-i18n="design.summary">Pages for this project, previewed live and turned into code when you are happy.</p>
+        </div>
+        <span class="grow"></span>
+        <button id="design-model" class="button design-model" aria-haspopup="listbox" aria-expanded="false" title="Model for this design" hidden>Auto model</button>
+        <div id="design-model-menu" class="model-menu design-model-menu" role="listbox" aria-label="Design model" hidden></div>
+        <button id="design-system" class="button" hidden>Design system</button>
+        <button id="design-implement" class="button primary" hidden disabled>Implement in project</button>
+        <button id="design-close" class="icon-button" aria-label="Close design" title="Close design">×</button>
+      </header>
+      <div id="design-home" class="design-home">
+        <h3 class="design-section-label">Make something new</h3>
+        <div class="design-tiles">
+          <button id="design-new" class="design-tile" type="button">
+            <span class="design-tile-icon" aria-hidden="true">✦</span>
+            <span class="design-tile-copy"><strong>Design</strong><small>Describe a page and watch it build</small></span>
+          </button>
+          <button id="design-tile-system" class="design-tile" type="button">
+            <span class="design-tile-icon" aria-hidden="true">◧</span>
+            <span class="design-tile-copy"><strong>Design System</strong><small>Colors, type and shape for this project</small></span>
+          </button>
+          <button class="design-tile soon" type="button" disabled>
+            <span class="design-tile-icon" aria-hidden="true">▶</span>
+            <span class="design-tile-copy"><strong>Slides</strong><small>Decks from an outline</small></span>
+            <span class="design-soon">Soon</span>
+          </button>
+          <button class="design-tile soon" type="button" disabled>
+            <span class="design-tile-icon" aria-hidden="true">▦</span>
+            <span class="design-tile-copy"><strong>Whiteboard</strong><small>Sketch flows and ideas</small></span>
+            <span class="design-soon">Soon</span>
+          </button>
+          <button id="design-tile-motion" class="design-tile" type="button">
+            <span class="design-tile-icon" aria-hidden="true">◎</span>
+            <span class="design-tile-copy"><strong>Motion</strong><small>Animated scenes with a timeline</small></span>
+          </button>
+        </div>
+        <div class="design-filter">
+          <button id="design-filter-all" class="design-filter-chip" type="button" aria-pressed="true">All designs</button>
+          <span class="grow"></span>
+          <button id="design-sort" class="text-button" type="button">Sort: Recent</button>
+        </div>
+        <div id="design-items" class="design-grid" aria-live="polite"></div>
+      </div>
+      <div id="design-workspace" class="design-body" hidden>
+        <aside class="design-iterations" aria-label="Design prompts">
+          <div class="design-iterations-head">
+            <span>Iterations</span>
+          </div>
+          <div id="design-turns" class="design-turns"></div>
+          <form id="design-prompt-form" class="design-prompt">
+            <textarea id="design-prompt" rows="4" maxlength="8000" placeholder="Describe an idea and turn it into a design…" required></textarea>
+            <div class="design-prompt-actions">
+              <button id="design-cancel" class="button" type="button" hidden>Stop</button>
+              <button id="design-send" class="button primary" type="submit">Generate</button>
+            </div>
+          </form>
+        </aside>
+        <section class="design-stage" aria-label="Preview">
+          <div class="design-stage-bar">
+            <div class="design-viewports" role="group" aria-label="Preview width">
+              <button id="design-viewport-desktop" class="design-viewport" aria-pressed="true">Desktop</button>
+              <button id="design-viewport-tablet" class="design-viewport" aria-pressed="false">Tablet</button>
+              <button id="design-viewport-phone" class="design-viewport" aria-pressed="false">Phone</button>
+            </div>
+            <span class="grow"></span>
+            <select id="design-versions" aria-label="Versions"></select>
+            <button id="design-restore" class="button" disabled>Restore</button>
+            <button id="design-save-version" class="button">Save version</button>
+            <button id="design-reload" class="icon-button" aria-label="Reload preview" title="Reload preview">↻</button>
+            <button id="design-reveal" class="icon-button" aria-label="Show design folder" title="Show design folder">▤</button>
+          </div>
+          <div id="design-preview-frame" class="design-preview-frame" data-viewport="desktop">
+            <iframe id="design-preview" class="design-preview" title="Design preview" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+          </div>
+          <p id="design-stage-empty" class="design-stage-empty">Pick a design, or create one from the Design home.</p>
+        </section>
+      </div>
+    </section>
+    <section id="motion" class="design motion" aria-label="Motion" hidden>
+      <header class="design-head">
+        <button id="motion-back" class="icon-button design-back" aria-label="Back to all motions" title="Back to all motions" hidden>←</button>
+        <div class="design-copy">
+          <h2 id="motion-title" data-i18n="motion.title">Motion</h2>
+          <p id="motion-summary" class="design-summary" data-i18n="motion.summary">Animated scenes for this project — scrubbed frame by frame and versioned on every turn.</p>
+        </div>
+        <span class="grow"></span>
+        <button id="motion-model" class="button design-model" aria-haspopup="listbox" aria-expanded="false" title="Model for this motion" hidden>Auto model</button>
+        <div id="motion-model-menu" class="model-menu design-model-menu" role="listbox" aria-label="Motion model" hidden></div>
+        <button id="motion-close" class="icon-button" aria-label="Close motion" title="Close motion">×</button>
+      </header>
+      <div id="motion-home" class="design-home">
+        <h3 class="design-section-label">Make something new</h3>
+        <div class="design-tiles">
+          <button id="motion-new" class="design-tile" type="button">
+            <span class="design-tile-icon" aria-hidden="true">◎</span>
+            <span class="design-tile-copy"><strong>Motion</strong><small>Describe a scene and watch it play</small></span>
+          </button>
+        </div>
+        <div class="design-filter">
+          <button class="design-filter-chip" type="button" aria-pressed="true">All motions</button>
+          <span class="grow"></span>
+          <button id="motion-sort" class="text-button" type="button">Sort: Recent</button>
+        </div>
+        <div id="motion-items" class="design-grid" aria-live="polite"></div>
+      </div>
+      <div id="motion-workspace" class="design-body" hidden>
+        <aside class="design-iterations" aria-label="Motion prompts">
+          <div class="design-iterations-head">
+            <span>Iterations</span>
+          </div>
+          <div id="motion-turns" class="design-turns"></div>
+          <form id="motion-prompt-form" class="design-prompt">
+            <textarea id="motion-prompt" rows="4" maxlength="8000" placeholder="Describe a motion — a title sequence, product film, a lower third…" required></textarea>
+            <div class="design-prompt-actions">
+              <button id="motion-cancel" class="button" type="button" hidden>Stop</button>
+              <button id="motion-send" class="button primary" type="submit">Generate</button>
+            </div>
+          </form>
+        </aside>
+        <section class="design-stage" aria-label="Motion stage">
+          <div class="design-stage-bar">
+            <div class="design-viewports" role="group" aria-label="Stage shape">
+              <button id="motion-stage-portrait" class="design-viewport" aria-pressed="true">Portrait</button>
+              <button id="motion-stage-landscape" class="design-viewport" aria-pressed="false">Landscape</button>
+            </div>
+            <span class="grow"></span>
+            <select id="motion-versions" aria-label="Versions"></select>
+            <button id="motion-restore" class="button" disabled>Restore</button>
+            <button id="motion-save-version" class="button">Save version</button>
+            <button id="motion-export" class="button" title="Render this scene to an MP4">Export MP4</button>
+            <button id="motion-reload" class="icon-button" aria-label="Reload scene" title="Reload scene">↻</button>
+            <button id="motion-reveal" class="icon-button" aria-label="Show motion folder" title="Show motion folder">▤</button>
+          </div>
+          <div id="motion-stage-frame" class="motion-frame">
+            <iframe id="motion-stage-preview" class="motion-preview" title="Motion stage" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
+          </div>
+          <div id="motion-transport" class="motion-transport" role="group" aria-label="Timeline">
+            <button id="motion-play" class="icon-button motion-play" aria-label="Play" title="Play">▶</button>
+            <button id="motion-restart" class="icon-button" aria-label="Restart" title="Restart">⏮</button>
+            <button id="motion-loop" class="icon-button motion-loop" aria-label="Loop" aria-pressed="false" title="Loop">⟲</button>
+            <input id="motion-scrub" class="motion-scrub" type="range" min="0" max="1000" step="1" value="0" aria-label="Timeline">
+            <span id="motion-time" class="motion-time">0:00.0 / 0:00.0</span>
+          </div>
+          <p id="motion-stage-empty" class="design-stage-empty">Pick a motion, or make one from the Motion home.</p>
+        </section>
+      </div>
     </section>
     <section id="tools-page" class="tools-page" aria-label="Toolkit" hidden>
       <header class="tools-head">

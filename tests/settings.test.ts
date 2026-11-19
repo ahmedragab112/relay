@@ -30,6 +30,21 @@ test('settings persist preferences and never expose or store plaintext keys', as
   assert.deepEqual(restored.publicProviders(), []);
 });
 
+test('hidden sessions can be shown again and stay shown after a restart', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const settings = new SettingsStore(root, codec);
+  await settings.load();
+  await settings.hideSessions(['abc', 'def']);
+  await settings.showSessions(['abc']);
+  assert.deepEqual(settings.preferences.hiddenSessions, ['def']);
+  const restored = new SettingsStore(root, codec);
+  await restored.load();
+  assert.deepEqual(restored.preferences.hiddenSessions, ['def']);
+  await restored.showSessions(['def', 'unknown']);
+  assert.deepEqual(restored.preferences.hiddenSessions, []);
+});
+
 test('settings discard unsafe provider and MCP entries when loading from disk', async t => {
   const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
   t.after(() => rm(root, { recursive: true, force: true }));

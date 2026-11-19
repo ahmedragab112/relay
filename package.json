@@ -31,7 +31,8 @@
     "electron-updater": "^6.8.11",
     "fflate": "0.8.3",
     "marked": "18.2.0",
-    "monaco-editor": "0.57.0"
+    "monaco-editor": "0.57.0",
+    "mp4-muxer": "5.2.2"
   },
   "devDependencies": {
     "@opencode/cli": "2.2.6",

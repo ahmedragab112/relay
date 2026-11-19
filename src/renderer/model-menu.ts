@@ -26,3 +26,8 @@ export function resolveVariant(variants: string[] | undefined, preferred: string
 export function variantLabel(variant: string): string {
   return variant ? variant[0].toUpperCase() + variant.slice(1) : '';
 }
+
+export function chosenModelLabel(models: ModelOption[], id: string): string {
+  const chosen = id ? models.find((model) => model.id === id) : undefined;
+  return chosen ? chosen.name : 'Auto model';
+}

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nearBottom, chooseModel, resolveInitialModel, isDirty, externalURL, parsePatch, reloadTransition, shouldDismissAttention } from '../src/renderer/state.js';
+import { nearBottom, chooseModel, resolveInitialModel, isDirty, externalURL, parsePatch, reloadTransition, shouldDismissAttention, previewKey } from '../src/renderer/state.js';
+import { chosenModelLabel } from '../src/renderer/model-menu.js';
 
 // These catch forced scrolling, unavailable model selection, lost edits, unsafe
 // navigation, incorrect diff classification, and dropped streaming reloads.
@@ -19,6 +20,16 @@ test('model selection uses only actual connected models', () => {
   assert.equal(chooseModel(models, 'live/b'), 'live/b');
   assert.equal(chooseModel(models, 'offline/m'), 'live/a');
   assert.equal(chooseModel([], 'imaginary/model'), '');
+});
+
+test('a saved artifact model is named, otherwise Auto', () => {
+  const models = [
+    { id: 'live/a', providerID: 'live', modelID: 'a', name: 'A', connected: true },
+    { id: 'live/b', providerID: 'live', modelID: 'b', name: 'B', connected: true },
+  ];
+  assert.equal(chosenModelLabel(models, 'live/b'), 'B');
+  assert.equal(chosenModelLabel(models, ''), 'Auto model');
+  assert.equal(chosenModelLabel(models, 'gone/model'), 'Auto model');
 });
 
 test('initial selection defaults to Auto and settles on an explicit pick', () => {
@@ -68,11 +79,21 @@ test('unified patches distinguish metadata from additions and deletions', () => 
 test('a background task refresh leaves the attention page open', () => {
   assert.equal(shouldDismissAttention('s1', 's1', false), false);
   assert.equal(shouldDismissAttention('', '', false), false);
+  assert.equal(shouldDismissAttention('', 's1', false), false, 'an automatic first selection must not dismiss the open page');
 });
 
 test('choosing a task dismisses attention even when it is already selected', () => {
   assert.equal(shouldDismissAttention('s1', 's1', true), true);
   assert.equal(shouldDismissAttention('s1', 's2', false), true);
+});
+
+test('the preview reloads only when the design content actually changed', () => {
+  const design = { slug: 'landing', updatedAt: 100, versions: 2 };
+  assert.equal(previewKey(undefined), '');
+  assert.equal(previewKey(design), previewKey({ ...design }), 'a view refresh with the same content must not reload');
+  assert.notEqual(previewKey(design), previewKey({ ...design, versions: 3 }));
+  assert.notEqual(previewKey(design), previewKey({ ...design, updatedAt: 101 }));
+  assert.notEqual(previewKey(design), previewKey({ ...design, slug: 'pricing' }));
 });
 
 test('reload state coalesces a burst and retains events during an in-flight request', () => {

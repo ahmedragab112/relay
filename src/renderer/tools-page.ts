@@ -4,7 +4,7 @@ import type {
 } from '../shared/contracts';
 import { byId, button, el, errorText, field, notify, option, report } from './dom';
 import { confirmAction, dialog } from './dialog';
-import { filterConnectors, type ConnectorFilter } from './extension-filter';
+import { ALL_FILTER, INSTALLED_FILTER, discoveryLayout, pluginFamily, type DiscoveryItem } from './discovery';
 import { catalogIconElement, connectorIcon, pluginIcon, skillIcon } from './catalog-icons';
 import { showSkillPreview } from './skill-install';
 import { externalURL } from './state';
@@ -30,12 +30,6 @@ function capabilitySummary({ commands, skills, agents, mcp, code }: PluginCapabi
   if (mcp.length) parts.push(`${mcp.length} MCP server${mcp.length === 1 ? '' : 's'}`);
   if (code.length) parts.push(`${code.length} code file${code.length === 1 ? '' : 's'}`);
   return parts.join(' · ') || 'No capabilities';
-}
-
-function sourceLabel(source: string): string {
-  if (!source) return 'Local';
-  if (source === 'Bundled with Relay') return 'Curated';
-  try { return new URL(source).host; } catch { return 'From the web'; }
 }
 
 function folderName(path: string): string {
@@ -96,12 +90,8 @@ export class ToolsPage {
         this.render();
       }, 120);
     });
-    this.primary.addEventListener('click', () => void this.installRemaining());
-    this.secondary.addEventListener('click', () => {
-      if (this.mode === 'skills') this.addSkillFromWeb();
-      else if (this.mode === 'plugins') this.importPluginFromWeb();
-      else this.editServer();
-    });
+    this.primary.addEventListener('click', () => this.openAdd());
+    this.secondary.addEventListener('click', () => void this.installRemaining());
     this.fromFile.addEventListener('click', () => void this.installZip());
     byId('tools-refresh').addEventListener('click', () => { if (this.mode === 'atlas') this.options.atlasRefresh(); else void this.reload(); });
     byId('tools-close').addEventListener('click', () => this.close());
@@ -192,13 +182,6 @@ export class ToolsPage {
     return this.connectorStatuses.find((entry) => entry.name === name);
   }
 
-  private async retryConnector(name: string): Promise<void> {
-    const statuses = await window.relay.connectConnector(name).catch(() => null);
-    if (!statuses) return;
-    this.connectorStatuses = statuses;
-    if (this.open && this.mode === 'connectors') this.render();
-  }
-
   async reload(): Promise<void> {
     if (!this.open || this.mode === 'atlas') return;
     const token = ++this.generation;
@@ -242,28 +225,20 @@ export class ToolsPage {
   private paintChrome(): void {
     this.title.textContent = this.mode === 'atlas' ? 'Atlas' : 'Toolkit';
     this.search.placeholder = 'Search tasks, projects, skills, plugins, and connectors';
-    this.secondary.textContent = this.mode === 'skills' ? 'Add skill from web…' : this.mode === 'plugins' ? 'Import plugin from web…' : 'Add server';
-    this.fromFile.hidden = this.mode !== 'plugins';
     this.summary.textContent = this.mode === 'atlas'
       ? 'Project knowledge, written by the agent and kept inside this project.'
       : this.mode === 'skills'
-        ? `${this.library.length} installed · ${this.skills.length} skill${this.skills.length === 1 ? '' : 's'} bundled with Relay`
+        ? `${this.skills.length} skills bundled with Relay · ${this.library.length} installed`
         : this.mode === 'plugins'
-          ? `${this.plugins.length} installed · ${this.catalog.length} plugin pack${this.catalog.length === 1 ? '' : 's'} bundled with Relay`
-          : `${this.connectors.filter((server) => server.enabled).length} enabled · ${this.connectors.length} connector${this.connectors.length === 1 ? '' : 's'} configured`;
-    this.paintChips();
-    this.paintPrimary();
+          ? `${this.catalog.length} plugin packs bundled with Relay · ${this.plugins.length} installed`
+          : `${this.connectorsCatalog.length} popular connectors · ${this.connectors.length} configured`;
+    this.paintActions();
     this.pressed();
   }
 
-  private paintChips(): void {
+  private paintChips(labels: string[]): void {
     if (this.mode === 'atlas') { this.chips.replaceChildren(); return; }
-    const items = this.mode === 'skills'
-      ? ['All', ...new Set(this.skills.map((entry) => entry.category))]
-      : this.mode === 'plugins'
-        ? ['All', 'Installed', 'Available']
-        : ['All', 'Local', 'Remote', 'Enabled', ...new Set(this.connectorsCatalog.map((entry) => entry.category))];
-    this.chips.replaceChildren(...items.map((label) => {
+    this.chips.replaceChildren(...labels.map((label) => {
       const chip = button(label, () => { this.filter = label; this.render(); }, 'extension-chip');
       chip.type = 'button';
       chip.setAttribute('aria-pressed', String(this.filter === label));
@@ -271,19 +246,26 @@ export class ToolsPage {
     }));
   }
 
-  private remaining(): number {
-    if (this.mode === 'connectors') return 0;
-    if (this.mode === 'skills') return this.skills.filter((entry) => this.visibleSkill(entry) && !this.installedSkill(entry.id)).length;
-    return this.catalog.filter((entry) => this.visiblePlugin(entry) && !this.installedPlugin(entry.id)).length;
+  private openAdd(): void {
+    if (this.mode === 'skills') this.addSkillFromWeb();
+    else if (this.mode === 'plugins') this.importPluginFromWeb();
+    else if (this.mode === 'connectors') this.editServer();
   }
 
-  private paintPrimary(): void {
+  private remaining(): number {
+    if (this.mode !== 'skills' && this.mode !== 'plugins') return 0;
+    const layout = discoveryLayout(this.discoveryItems(), this.filter, this.query);
+    return layout.sections.reduce((total, section) => total + section.items.filter((item) => !item.installed).length, 0);
+  }
+
+  private paintActions(): void {
     if (this.mode === 'atlas') { this.primary.hidden = true; this.secondary.hidden = true; return; }
-    this.secondary.hidden = false;
-    const remaining = this.remaining();
-    this.primary.hidden = remaining === 0;
+    this.primary.hidden = false;
     this.primary.disabled = this.busy;
-    if (!this.busy && remaining) this.primary.textContent = `Install all ${remaining}`;
+    this.primary.textContent = this.mode === 'skills' ? 'Add skill' : this.mode === 'plugins' ? 'Add plugin' : 'Add connector';
+    const remaining = this.busy ? 0 : this.remaining();
+    this.secondary.hidden = this.busy || remaining === 0;
+    this.secondary.textContent = remaining ? `Install all ${remaining}` : '';
   }
 
   private installedSkill(id: string): SkillLibraryEntry | undefined {
@@ -294,37 +276,205 @@ export class ToolsPage {
     return this.plugins.find((entry) => entry.id === id);
   }
 
-  private matches(query: string, ...values: string[]): boolean {
-    const needle = query.trim().toLowerCase();
-    return !needle || values.join(' ').toLowerCase().includes(needle);
+  private catalogPlugin(id: string): PluginCatalogEntry | undefined {
+    return this.catalog.find((entry) => entry.id === id);
   }
 
-  private visibleSkill(entry: CatalogSkillEntry): boolean {
-    if (this.filter !== 'All' && entry.category !== this.filter) return false;
-    return this.matches(this.query, entry.name, entry.description, entry.category);
+  private catalogConnector(name: string): ConnectorCatalogEntry | undefined {
+    return this.connectorsCatalog.find((entry) => entry.name === name);
   }
 
-  private visiblePlugin(entry: PluginCatalogEntry): boolean {
-    if (this.filter === 'Installed' && !this.installedPlugin(entry.id)) return false;
-    if (this.filter === 'Available' && this.installedPlugin(entry.id)) return false;
-    return this.matches(this.query, entry.name, entry.description);
+  private discoveryItems(): DiscoveryItem[] {
+    if (this.mode === 'skills') {
+      const items: DiscoveryItem[] = this.skills.map((entry) => ({
+        id: entry.id, name: entry.name, description: entry.description, family: entry.category,
+        installed: Boolean(this.installedSkill(entry.id)), bundled: true,
+      }));
+      const known = new Set(this.skills.map((entry) => entry.id));
+      for (const entry of this.library) {
+        if (!known.has(entry.id)) {
+          items.push({ id: entry.id, name: entry.name, description: entry.description, family: 'Local skills', installed: true, bundled: false });
+        }
+      }
+      return items;
+    }
+    if (this.mode === 'plugins') {
+      const items: DiscoveryItem[] = this.catalog.map((entry) => ({
+        id: entry.id, name: entry.name, description: entry.description, family: pluginFamily(entry.name),
+        installed: Boolean(this.installedPlugin(entry.id)), bundled: true,
+      }));
+      const known = new Set(this.catalog.map((entry) => entry.id));
+      for (const entry of this.plugins) {
+        if (!known.has(entry.id)) {
+          items.push({ id: entry.id, name: entry.name, description: entry.description, family: 'Local plugins', installed: true, bundled: false });
+        }
+      }
+      return items;
+    }
+    const items: DiscoveryItem[] = this.connectorsCatalog.map((entry) => ({
+      id: entry.name, name: entry.name, description: entry.description, family: entry.category,
+      installed: entry.configured, bundled: true,
+      tags: [entry.type === 'local' ? 'Local' : 'Remote', ...(entry.configured ? ['Enabled'] : [])],
+    }));
+    const known = new Set(this.connectorsCatalog.map((entry) => entry.name));
+    for (const server of this.connectors) {
+      if (known.has(server.name)) continue;
+      items.push({
+        id: server.name, name: server.name,
+        description: server.type === 'local' ? (server.command ?? []).join(' ') : server.url ?? '',
+        family: 'Local servers', installed: true, bundled: false,
+        tags: [server.type === 'local' ? 'Local' : 'Remote', ...(server.enabled ? ['Enabled'] : [])],
+      });
+    }
+    return items;
   }
 
-  private visibleConnectors(): McpServer[] {
-    const filter: ConnectorFilter = this.filter === 'Local' ? 'local' : this.filter === 'Remote' ? 'remote' : this.filter === 'Enabled' ? 'enabled' : 'all';
-    return filterConnectors(this.connectors, this.query, filter);
+  private connectorExtras(): string[] {
+    return this.mode === 'connectors' ? ['Local', 'Remote', 'Enabled'] : [];
   }
 
   private render(): void {
     if (this.mode === 'atlas') return;
-    this.body.replaceChildren(...this.searchSections(), ...this.sections());
-    this.paintPrimary();
+    const items = this.discoveryItems();
+    const layout = discoveryLayout(items, this.filter, this.query, this.connectorExtras());
+    this.paintChips(layout.chips);
+
+    const hero = el('section', 'discovery-hero');
+    const intro = el('div', 'discovery-intro');
+    intro.append(el('p', 'discovery-eyebrow', 'Discovery'), el('h2', 'discovery-headline', layout.headline));
+    const count = el('span', 'discovery-count', `Installed ${items.filter((item) => item.installed).length}`);
+    hero.append(intro, count);
+
+    const view = el('div', 'discovery-view');
+    if (!layout.sections.length) {
+      view.append(el('p', 'tools-empty', this.emptyMessage()));
+    } else {
+      for (const section of layout.sections) {
+        const group = el('section', 'discovery-group');
+        group.append(el('h3', 'discovery-group-title', `${section.title} · ${section.items.length}`));
+        const grid = el('div', 'discovery-grid');
+        for (const item of section.items) grid.append(this.discoveryCard(item));
+        group.append(grid);
+        view.append(group);
+      }
+    }
+    this.body.replaceChildren(hero, ...this.searchSections(), view);
+    this.paintActions();
   }
 
-  private sections(): HTMLElement[] {
-    if (this.mode === 'skills') return this.skillSections();
-    if (this.mode === 'plugins') return this.pluginSections();
-    return this.connectorSections();
+  private emptyMessage(): string {
+    if (this.query.trim()) return `No ${this.mode} match that search.`;
+    if (this.filter === INSTALLED_FILTER) return `Nothing installed yet. Use “${this.primary.textContent}” to add one.`;
+    return `No ${this.mode} in this view.`;
+  }
+
+  private discoveryCard(item: DiscoveryItem): HTMLElement {
+    const card = el('article', 'discovery-card');
+    const icon = this.mode === 'skills'
+      ? skillIcon(item.family)
+      : this.mode === 'plugins'
+        ? pluginIcon(item.name)
+        : connectorIcon(item.name, this.catalogConnector(item.id)?.type ?? this.connectors.find((server) => server.name === item.id)?.type ?? 'local');
+    const tile = el('span', 'discovery-tile');
+    tile.append(catalogIconElement(icon));
+    const copy = el('div', 'discovery-card-copy');
+    const title = el('div', 'discovery-card-title');
+    title.append(el('strong', '', item.name));
+    if (item.bundled) {
+      const verified = el('span', 'discovery-verified', '✓');
+      verified.title = 'Bundled with Relay';
+      title.append(verified);
+    }
+    copy.append(title, el('p', 'discovery-card-desc', item.description || 'No description'));
+    if (this.mode === 'plugins') {
+      const entry = this.catalogPlugin(item.id);
+      const capabilities = entry?.capabilities ?? this.installedPlugin(item.id)?.capabilities;
+      if (capabilities) copy.append(el('p', 'discovery-meta', capabilitySummary(capabilities)));
+    } else if (this.mode === 'connectors') {
+      const entry = this.catalogConnector(item.id);
+      const server = this.connectors.find((candidate) => candidate.name === item.id);
+      const meta = el('p', 'discovery-meta', (entry?.type ?? server?.type) === 'remote' ? 'Remote server' : 'Local server');
+      if (server) meta.append(' · ', this.connectorStatusPill(server));
+      copy.append(meta);
+      const error = server ? this.statusFor(server.name)?.error : undefined;
+      if (error) copy.append(el('p', 'connector-error', error));
+    }
+
+    const trailing = el('div', 'discovery-trailing');
+    if (item.installed) {
+      const plugin = this.mode === 'plugins' ? this.installedPlugin(item.id) : undefined;
+      const status = el('span', 'discovery-status', this.mode === 'plugins' ? (plugin?.enabled === false ? 'Disabled' : '✓ Enabled') : '✓ Installed');
+      status.title = 'Installed';
+      trailing.append(status);
+      if (plugin) trailing.append(button(plugin.enabled ? 'Disable' : 'Enable', () => void this.togglePlugin(plugin), 'text-button'));
+      if (this.mode === 'connectors') {
+        const server = this.connectors.find((candidate) => candidate.name === item.id);
+        if (server) {
+          const status = this.statusFor(server.name);
+          if (status?.status === 'failed') {
+            const retry = button('Retry', () => void this.retryConnector(server.name), 'text-button');
+            retry.setAttribute('aria-label', `Retry connector ${server.name}`);
+            trailing.append(retry);
+          }
+          trailing.append(button(server.enabled ? 'Disable' : 'Enable', () => void this.toggleServer(server, !server.enabled), 'text-button'));
+          trailing.append(button('Edit', () => this.editServer(server, true), 'text-button'));
+        }
+      }
+      if (this.filter === INSTALLED_FILTER || !item.bundled) {
+        trailing.append(button('Remove', () => void this.removeItem(item), 'text-button danger'));
+      }
+    } else {
+      trailing.append(button(this.mode === 'connectors' ? 'Add' : 'Install', () => void this.installItem(item), 'button discovery-install'));
+    }
+    card.append(tile, copy, trailing);
+    return card;
+  }
+
+  private async installItem(item: DiscoveryItem): Promise<void> {
+    if (this.busy) return;
+    if (this.mode === 'connectors') {
+      const entry = this.catalogConnector(item.id);
+      if (entry) this.editServer(this.connectorDraft(entry));
+      return;
+    }
+    this.busy = true;
+    this.paintActions();
+    try {
+      if (this.mode === 'skills') {
+        this.library = await window.relay.installCatalogSkill(item.id);
+      } else {
+        const preview = await window.relay.previewCatalogPlugin(item.id);
+        if (preview.capabilities.code.length) throw new Error('This package ships executable code, which Relay does not activate.');
+        this.plugins = await window.relay.installPlugin(preview.token, false);
+      }
+      notify(`Installed ${item.name}.`);
+    } catch (error) {
+      report(`Could not install ${item.name}`, error);
+    } finally {
+      this.busy = false;
+      this.paintChrome();
+      this.render();
+    }
+  }
+
+  private async removeItem(item: DiscoveryItem): Promise<void> {
+    if (this.mode === 'skills') {
+      const entry = this.library.find((candidate) => candidate.id === item.id);
+      if (entry) await this.removeSkill(entry);
+    } else if (this.mode === 'plugins') {
+      const entry = this.plugins.find((candidate) => candidate.id === item.id);
+      if (entry) await this.removePlugin(entry);
+    } else {
+      const server = this.connectors.find((candidate) => candidate.name === item.id);
+      if (server) await this.removeServer(server);
+    }
+  }
+
+  private connectorDraft(entry: ConnectorCatalogEntry): McpServer {
+    return {
+      name: entry.name, type: entry.type, enabled: true,
+      ...(entry.command ? { command: entry.command } : {}), ...(entry.url ? { url: entry.url } : {}),
+    };
   }
 
   private searchSections(): HTMLElement[] {
@@ -370,77 +520,6 @@ export class ToolsPage {
     return sections;
   }
 
-  private skillSections(): HTMLElement[] {
-    const installedItems = this.library.filter((entry) => this.matches(this.query, entry.name, entry.description, entry.source));
-    const curated = this.skills.filter((entry) => this.visibleSkill(entry));
-    const installed = el('section', 'tools-section');
-    installed.append(el('h3', '', `Installed · ${this.library.length}`),
-      el('p', '', 'These skills are ready for the agent in every project on this Mac.'));
-    if (!installedItems.length) {
-      installed.append(el('p', 'tools-empty', this.library.length ? 'No installed skills match that search.' : 'No skills installed yet. Install one from the curated catalog below.'));
-    } else {
-      const list = el('div', 'tools-installed');
-      for (const entry of installedItems) list.append(this.installedSkillRow(entry));
-      installed.append(list);
-    }
-    const curatedSection = el('section', 'tools-section');
-    curatedSection.append(el('h3', '', `Curated skills · ${curated.length}`),
-      el('p', '', 'One hundred working skills bundled with Relay. Installing copies the skill into your local library over no network.'));
-    if (!curated.length) {
-      curatedSection.append(el('p', 'tools-empty', 'No skills match that search.'));
-    } else {
-      const grid = el('div', 'tools-grid');
-      for (const entry of curated) grid.append(this.skillCard(entry));
-      curatedSection.append(grid);
-    }
-    return [installed, curatedSection];
-  }
-
-  private installedSkillRow(entry: SkillLibraryEntry): HTMLElement {
-    const row = el('section', 'integration-row');
-    const head = el('div', 'row');
-    const identity = el('div', 'row row-identity');
-    const category = this.skills.find((skill) => skill.id === entry.id)?.category ?? '';
-    const source = el('span', 'pill', entry.source === 'Bundled with Relay' ? 'Curated' : sourceLabel(entry.source));
-    source.title = entry.source || 'Installed locally';
-    identity.append(catalogIconElement(skillIcon(category)), el('strong', '', entry.name), el('span', 'pill', 'Skill'), source);
-    const remove = button('Remove', () => void this.removeSkill(entry), 'text-button danger');
-    remove.title = `Remove ${entry.name} from this Mac`;
-    head.append(identity, remove);
-    row.append(head, el('p', '', entry.description || 'No description'), el('p', 'small muted', `${entry.files} file${entry.files === 1 ? '' : 's'} · installed ${new Date(entry.installedAt).toLocaleDateString()}`));
-    return row;
-  }
-
-  private skillCard(entry: CatalogSkillEntry): HTMLElement {
-    const installed = this.installedSkill(entry.id);
-    const card = el('article', 'tools-card');
-    const head = el('div', 'tools-card-head');
-    head.append(catalogIconElement(skillIcon(entry.category)), el('strong', '', entry.name), el('span', 'pill', entry.category));
-    if (installed) head.append(el('span', 'pill', 'Installed'));
-    card.append(head, el('p', 'tools-card-copy', entry.description));
-    const actions = el('div', 'tools-card-actions');
-    if (installed) {
-      const remove = button('Remove', () => void this.removeSkill(installed), 'text-button danger');
-      actions.append(remove);
-    } else {
-      const install = button('Install', async () => {
-        install.textContent = 'Installing…';
-        try {
-          this.library = await window.relay.installCatalogSkill(entry.id);
-          notify(`Installed ${entry.name}.`);
-          this.paintChrome();
-          this.render();
-        } catch (error) {
-          report(`Could not install ${entry.name}`, error);
-          install.textContent = 'Install';
-        }
-      }, 'button primary');
-      actions.append(install);
-    }
-    card.append(actions);
-    return card;
-  }
-
   private async removeSkill(entry: SkillLibraryEntry): Promise<void> {
     if (!await confirmAction('Remove skill?', `“${entry.name}” will no longer be available to the agent in any project. Your project files are not changed.`, 'Remove skill')) return;
     try {
@@ -449,92 +528,6 @@ export class ToolsPage {
       this.paintChrome();
       this.render();
     } catch (error) { report(`Could not remove ${entry.name}`, error); }
-  }
-
-  private pluginSections(): HTMLElement[] {
-    const installedItems = this.plugins.filter((entry) => this.matches(this.query, entry.name, entry.description));
-    const curated = this.catalog.filter((entry) => this.visiblePlugin(entry));
-    const installed = el('section', 'tools-section');
-    installed.append(el('h3', '', `Installed · ${this.plugins.length}`),
-      el('p', '', 'Installed plugins add their commands to every task. Enable, disable, or remove them here.'));
-    if (!installedItems.length) {
-      installed.append(el('p', 'tools-empty', this.plugins.length ? 'No installed plugins match that search.' : 'No plugins installed yet. Install one from the curated catalog below.'));
-    } else {
-      const list = el('div', 'tools-installed');
-      for (const entry of installedItems) list.append(this.installedPluginRow(entry));
-      installed.append(list);
-    }
-    const curatedSection = el('section', 'tools-section');
-    curatedSection.append(el('h3', '', `Curated plugins · ${curated.length}`),
-      el('p', '', 'One hundred declarative plugin packs bundled with Relay. Each pack adds slash commands and no executable code.'));
-    if (!curated.length) {
-      curatedSection.append(el('p', 'tools-empty', 'No plugins match that search.'));
-    } else {
-      const grid = el('div', 'tools-grid');
-      for (const entry of curated) grid.append(this.pluginCard(entry));
-      curatedSection.append(grid);
-    }
-    return [installed, curatedSection];
-  }
-
-  private installedPluginRow(plugin: PluginView): HTMLElement {
-    const row = el('section', 'integration-row');
-    const head = el('div', 'row');
-    const identity = el('div', 'row row-identity');
-    identity.append(catalogIconElement(pluginIcon(plugin.name)), el('strong', '', plugin.name), el('span', 'pill', `v${plugin.version}`),
-      el('span', 'pill', !plugin.available ? 'Files missing' : plugin.enabled ? 'Enabled' : 'Disabled'));
-    const actions = el('div', 'row');
-    const toggle = button(plugin.enabled ? 'Disable' : 'Enable', async () => {
-      try {
-        this.plugins = await window.relay.setPluginEnabled(plugin.id, !plugin.enabled);
-        this.paintChrome();
-        this.render();
-      } catch (error) { report(`Could not update ${plugin.name}`, error); }
-    }, 'text-button');
-    toggle.disabled = !plugin.available;
-    const remove = button('Remove', () => void this.removePlugin(plugin), 'text-button danger');
-    actions.append(toggle, remove);
-    head.append(identity, actions);
-    row.append(head, el('p', '', plugin.description || 'No description'), el('p', 'small muted', capabilitySummary(plugin.capabilities)));
-    return row;
-  }
-
-  private pluginCard(entry: PluginCatalogEntry): HTMLElement {
-    const installed = this.installedPlugin(entry.id);
-    const card = el('article', 'tools-card');
-    const head = el('div', 'tools-card-head');
-    head.append(catalogIconElement(pluginIcon(entry.name)), el('strong', '', entry.name), el('span', 'pill', `v${entry.version}`));
-    if (installed) head.append(el('span', 'pill', 'Installed'));
-    card.append(head, el('p', 'tools-card-copy', entry.description));
-    if (entry.capabilities.commands.length) {
-      const detail = el('details', 'tools-commands');
-      detail.append(el('summary', '', `${entry.capabilities.commands.length} commands`));
-      const list = el('ul');
-      for (const name of entry.capabilities.commands) list.append(el('li', '', `/${name}`));
-      detail.append(list);
-      card.append(detail);
-    }
-    card.append(el('p', 'small muted', capabilitySummary(entry.capabilities)));
-    if (!installed) {
-      const install = button('Install', async () => {
-        install.textContent = 'Installing…';
-        try {
-          const preview = await window.relay.previewCatalogPlugin(entry.id);
-          if (preview.capabilities.code.length) throw new Error('This package ships executable code, which Relay does not activate.');
-          this.plugins = await window.relay.installPlugin(preview.token, false);
-          notify(`Installed ${entry.name}.`);
-          this.paintChrome();
-          this.render();
-        } catch (error) {
-          report(`Could not install ${entry.name}`, error);
-          install.textContent = 'Install';
-        }
-      }, 'button primary');
-      const actions = el('div', 'tools-card-actions');
-      actions.append(install);
-      card.append(actions);
-    }
-    return card;
   }
 
   private async removePlugin(plugin: PluginView): Promise<void> {
@@ -547,40 +540,29 @@ export class ToolsPage {
     } catch (error) { report(`Could not remove ${plugin.name}`, error); }
   }
 
-  private visibleCatalogConnectors(): ConnectorCatalogEntry[] {
-    return this.connectorsCatalog.filter((entry) => {
-      if (this.filter === 'Local' && entry.type !== 'local') return false;
-      if (this.filter === 'Remote' && entry.type !== 'remote') return false;
-      if (this.filter === 'Enabled' && !entry.configured) return false;
-      if (this.filter !== 'All' && this.filter !== 'Local' && this.filter !== 'Remote' && this.filter !== 'Enabled' && entry.category !== this.filter) return false;
-      return this.matches(this.query, entry.name, entry.description, entry.category);
-    });
+  private async togglePlugin(plugin: PluginView): Promise<void> {
+    try {
+      this.plugins = await window.relay.setPluginEnabled(plugin.id, !plugin.enabled);
+      this.paintChrome();
+      this.render();
+    } catch (error) { report(`Could not update ${plugin.name}`, error); }
   }
 
-  private connectorSections(): HTMLElement[] {
-    const configured = this.visibleConnectors();
-    const popular = this.visibleCatalogConnectors();
-    const yours = el('section', 'tools-section');
-    yours.append(el('h3', '', `Your connectors · ${configured.length}`),
-      el('p', '', 'Connectors are MCP servers that give the agent extra tools. Local servers run commands on this Mac; remote servers use an HTTP URL. Every change is confirmed by the app.'));
-    if (!configured.length) {
-      yours.append(el('p', 'tools-empty', this.connectors.length ? 'No connectors match that search.' : 'No connectors configured yet. Add one from the popular list below.'));
-    } else {
-      const list = el('div', 'tools-installed');
-      for (const server of configured) list.append(this.connectorRow(server));
-      yours.append(list);
-    }
-    const catalog = el('section', 'tools-section');
-    catalog.append(el('h3', '', `Popular connectors · ${popular.length}`),
-      el('p', '', 'One hundred popular MCP connectors bundled with Relay. Adding one fills in the confirmation form so you can review the exact command or URL before it is saved.'));
-    if (!popular.length) {
-      catalog.append(el('p', 'tools-empty', 'No popular connectors match that search.'));
-    } else {
-      const grid = el('div', 'tools-grid');
-      for (const entry of popular) grid.append(this.connectorCatalogCard(entry));
-      catalog.append(grid);
-    }
-    return [yours, catalog];
+  private async retryConnector(name: string): Promise<void> {
+    const statuses = await window.relay.connectConnector(name).catch(() => null);
+    if (!statuses) return;
+    this.connectorStatuses = statuses;
+    if (this.open && this.mode === 'connectors') this.render();
+  }
+
+  private async toggleServer(server: McpServer, enabled: boolean): Promise<void> {
+    try {
+      await window.relay.saveMcp({ ...server, enabled });
+      this.connectors = await window.relay.listMcp();
+      this.connectorStatuses = await window.relay.connectorStatus().catch(() => this.connectorStatuses);
+      this.paintChrome();
+      this.render();
+    } catch (error) { report(`Could not update ${server.name}`, error); }
   }
 
   private connectorStatusPill(server: McpServer): HTMLElement {
@@ -590,61 +572,6 @@ export class ToolsPage {
     const pill = el('span', `pill status-${status.status}`, label);
     if (status.error) pill.title = status.error;
     return pill;
-  }
-
-  private connectorRow(server: McpServer): HTMLElement {
-    const row = el('section', 'integration-row');
-    const head = el('div', 'row');
-    const identity = el('div', 'row row-identity');
-    identity.append(catalogIconElement(connectorIcon(server.name, server.type)), el('strong', '', server.name), el('span', 'pill', server.type === 'local' ? 'Local' : 'Remote'), this.connectorStatusPill(server));
-    const actions = el('div', 'row');
-    const toggle = button(server.enabled ? 'Disable' : 'Enable', () => void this.saveServer({ ...server, enabled: !server.enabled }), 'text-button');
-    const edit = button('Edit', () => this.editServer(server, true), 'text-button');
-    const remove = button('Remove', () => void this.removeServer(server), 'text-button danger');
-    actions.append(toggle, edit, remove);
-    const status = this.statusFor(server.name);
-    if (status?.status === 'failed') {
-      const retry = button('Retry', () => void this.retryConnector(server.name), 'text-button');
-      retry.setAttribute('aria-label', `Retry connector ${server.name}`);
-      actions.append(retry);
-    }
-    head.append(identity, actions);
-    row.append(head, el('p', '', server.type === 'local' ? (server.command ?? []).join(' ') : server.url ?? ''));
-    if (status?.error) row.append(el('p', 'connector-error', status.error));
-    return row;
-  }
-
-  private connectorCatalogCard(entry: ConnectorCatalogEntry): HTMLElement {
-    const card = el('article', 'tools-card');
-    const head = el('div', 'tools-card-head');
-    head.append(catalogIconElement(connectorIcon(entry.name, entry.type)), el('strong', '', entry.name), el('span', 'pill', entry.type === 'local' ? 'Local' : 'Remote'));
-    if (entry.configured) {
-      const configuredServer = this.connectors.find(server => server.name === entry.name);
-      const status = this.statusFor(entry.name);
-      head.append(configuredServer && status ? this.connectorStatusPill(configuredServer) : el('span', 'pill', 'Configured'));
-    }
-    card.append(head, el('p', 'tools-card-copy', entry.description), el('p', 'small muted', entry.category));
-    const actions = el('div', 'tools-card-actions');
-    const configuredServer = entry.configured ? this.connectors.find((server) => server.name === entry.name) : undefined;
-    const draft: McpServer = {
-      name: entry.name, type: entry.type, enabled: true,
-      ...(entry.command ? { command: entry.command } : {}), ...(entry.url ? { url: entry.url } : {}),
-    };
-    actions.append(button(entry.configured ? 'Edit' : 'Add', () => configuredServer ? this.editServer(configuredServer, true) : this.editServer(draft), 'button primary'));
-    card.append(actions);
-    return card;
-  }
-
-  private async saveServer(server: McpServer): Promise<void> {
-    if (this.busy) return;
-    this.busy = true;
-    try {
-      await window.relay.saveMcp(server);
-      this.connectors = await window.relay.listMcp();
-      this.paintChrome();
-      this.render();
-    } catch (error) { report(`Could not update ${server.name}`, error); }
-    finally { this.busy = false; }
   }
 
   private async removeServer(server: McpServer): Promise<void> {
@@ -711,31 +638,30 @@ export class ToolsPage {
   }
 
   private async installRemaining(): Promise<void> {
-    if (this.busy || this.mode === 'connectors') return;
+    if (this.busy || (this.mode !== 'skills' && this.mode !== 'plugins')) return;
+    const missing = discoveryLayout(this.discoveryItems(), this.filter, this.query)
+      .sections.flatMap((section) => section.items)
+      .filter((item) => item.bundled && !item.installed);
+    if (!missing.length) return;
     this.busy = true;
-    this.paintPrimary();
+    this.paintActions();
     const mode = this.mode;
+    this.secondary.hidden = false;
     let count = 0;
     try {
-      if (mode === 'skills') {
-        const missing = this.skills.filter((entry) => this.visibleSkill(entry) && !this.installedSkill(entry.id));
-        for (const entry of missing) {
-          this.primary.textContent = `Installing ${count + 1}/${missing.length}…`;
-          await window.relay.installCatalogSkill(entry.id);
-          count++;
-        }
-        this.library = await window.relay.listLibrarySkills();
-      } else {
-        const missing = this.catalog.filter((entry) => this.visiblePlugin(entry) && !this.installedPlugin(entry.id));
-        for (const entry of missing) {
-          this.primary.textContent = `Installing ${count + 1}/${missing.length}…`;
-          const preview = await window.relay.previewCatalogPlugin(entry.id);
+      for (const item of missing) {
+        this.secondary.textContent = `Installing ${count + 1}/${missing.length}…`;
+        if (mode === 'skills') {
+          await window.relay.installCatalogSkill(item.id);
+        } else {
+          const preview = await window.relay.previewCatalogPlugin(item.id);
           if (preview.capabilities.code.length) continue;
           await window.relay.installPlugin(preview.token, false);
-          count++;
         }
-        this.plugins = await window.relay.listPlugins();
+        count++;
       }
+      if (mode === 'skills') this.library = await window.relay.listLibrarySkills();
+      else this.plugins = await window.relay.listPlugins();
       if (count) notify(`Installed ${count} ${mode}.`);
     } catch (error) {
       report(`Could not install every ${mode === 'skills' ? 'skill' : 'plugin'}`, error);
