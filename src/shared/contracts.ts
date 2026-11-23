@@ -1,6 +1,7 @@
 import type { ConfigurableProviderID } from './providers';
 import type { AtlasCard, AtlasLanguage, AtlasView } from './atlas';
-import type { DesignSystem, DesignVersion, DesignView } from './design';
+import type { KnowledgeMeta } from './knowledge';
+import type { DesignComment, DesignKind, DesignPage, DesignSystem, DesignVersion, DesignView } from './design';
 import type { MotionStage, MotionVersion, MotionView } from './motion';
 
 export type { UpdatePhase, UpdateStatus, UpdateSignal } from './updates';
@@ -685,6 +686,14 @@ export interface SendMessageInput {
   autoSettings?: AutoSettings;
 }
 
+/** Files, skills, agents and context a design turn can carry besides its request. */
+export interface DesignSendExtras {
+  files?: string[];
+  skills?: string[];
+  agents?: string[];
+  context?: ContextBlock[];
+}
+
 export interface QueuedMessage {
   id: string;
   text: string;
@@ -725,6 +734,7 @@ export type AppEvent =
   | { type: 'auto-switched'; sessionId: string; model: string; detail: string }
   | { type: 'atlas'; workspaceId: string; view: AtlasView }
   | { type: 'design'; workspaceId: string; view: DesignView }
+  | { type: 'design-files'; workspaceId: string; slug: string; stamp: number }
   | { type: 'motion'; workspaceId: string; view: MotionView }
   | { type: 'motion-export'; workspaceId: string; slug: string; status: 'running' | 'done' | 'failed'; progress: number; file?: string; message?: string }
   | { type: 'update'; status: UpdateStatus }
@@ -747,17 +757,38 @@ export interface RelayAPI {
   generateAtlas(language: AtlasLanguage, sessionId?: string, sourceTitle?: string): Promise<AtlasView>;
   revealAtlas(language: AtlasLanguage): Promise<void>;
   cancelAtlas(): Promise<void>;
+  knowledgeList(): Promise<KnowledgeMeta[]>;
+  knowledgeRead(id: string): Promise<string>;
+  knowledgeAddNote(input: { title?: string; text: string }): Promise<KnowledgeMeta[]>;
+  knowledgeAddFile(): Promise<{ sources: KnowledgeMeta[]; skipped: string[] }>;
+  knowledgeAddLink(url: string): Promise<KnowledgeMeta[]>;
+  knowledgeRemove(id: string): Promise<KnowledgeMeta[]>;
+  knowledgeReveal(): Promise<void>;
   designView(): Promise<DesignView>;
-  designCreate(name: string): Promise<DesignView>;
-  designSend(slug: string, text: string): Promise<{ sessionId: string }>;
+  designCreate(name: string, kind?: DesignKind): Promise<DesignView>;
+  designSend(slug: string, text: string, extras?: DesignSendExtras): Promise<{ sessionId: string }>;
   designSnapshot(slug: string): Promise<DesignView>;
   designVersions(slug: string): Promise<DesignVersion[]>;
   designRestore(slug: string, version: number): Promise<DesignView>;
+  designPages(slug: string): Promise<DesignPage[]>;
+  designAddPage(slug: string, name: string): Promise<DesignView>;
+  designSavePage(slug: string, file: string, html: string): Promise<DesignView>;
+  designComments(slug: string): Promise<DesignComment[]>;
+  designAddComment(slug: string, comment: { page: string; selector: string; note: string }): Promise<DesignComment[]>;
+  designResolveComment(slug: string, id: string): Promise<DesignComment[]>;
+  designSendComments(slug: string): Promise<{ sessionId: string }>;
+  designExportHTML(slug: string): Promise<string | null>;
+  designExportPDF(slug: string, file?: string): Promise<string | null>;
   designSetModel(slug: string, model: string): Promise<DesignView>;
   saveDesignSystem(system: DesignSystem): Promise<DesignView>;
+  saveLibrarySystem(system: DesignSystem): Promise<DesignView>;
+  designSetSystem(slug: string, id: string): Promise<DesignView>;
+  designDeleteSystem(id: string): Promise<DesignView>;
   designImplement(slug: string): Promise<{ sessionId: string }>;
   designReveal(slug: string): Promise<void>;
-  designCancel(slug: string): Promise<void>;
+  designCode(slug: string, file?: string): Promise<{ name: string; text: string }>;
+  designOpenPreview(slug: string, file?: string): Promise<void>;
+  designCancel(slug: string): Promise<boolean>;
   designForSession(sessionId: string): Promise<string | undefined>;
   designDelete(slug: string): Promise<DesignView>;
   motionView(): Promise<MotionView>;

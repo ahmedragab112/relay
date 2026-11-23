@@ -393,7 +393,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     maxTokens.value = String(getState().preferences.auto.maxTokens);
     const maxRow = el('label', 'settings-toggle');
     const maxCopy = el('span', 'settings-copy');
-    maxCopy.append(el('strong', '', 'Max tokens per request'), el('small', '', 'Cap the token budget auto mode requests. Lower values avoid credit errors on providers with limited balances.'));
+    maxCopy.append(el('strong', '', 'Max tokens per request'), el('small', '', 'Caps the output tokens Relay asks each model for. Lower values avoid credit errors on providers with limited balances.'));
     const maxNumber = el('span', 'settings-number');
     maxNumber.append(maxTokens);
     maxRow.append(maxCopy, maxNumber);

@@ -13,6 +13,7 @@ export class ReviewCard {
   private changes: FileChange[] = [];
   private expanded = false;
   private openPaths = new Set<string>();
+  private hover?: HTMLElement;
 
   constructor(private review: () => void, private onChanges: () => void = () => {}) {
   }
@@ -67,6 +68,7 @@ export class ReviewCard {
 
   // Expanding a file's preview only re-paints, so toggling never trips the change signature.
   private paint(): void {
+    this.hidePreview();
     const changes = this.changes;
     let additions = 0;
     let deletions = 0;
@@ -102,6 +104,10 @@ export class ReviewCard {
         else this.openPaths.add(change.path);
         this.paint();
       });
+      row.addEventListener('pointerenter', () => this.preview(change, row));
+      row.addEventListener('pointerleave', () => this.hidePreview());
+      row.addEventListener('focus', () => this.preview(change, row));
+      row.addEventListener('blur', () => this.hidePreview());
       list.append(row);
       if (open) list.append(this.diffPreview(change));
     }
@@ -114,6 +120,53 @@ export class ReviewCard {
     }
 
     this.control.replaceChildren(head, list);
+  }
+
+  // Read-only patch floating beside the row; clicking still pins the diff inline.
+  private preview(change: FileChange, row: HTMLElement): void {
+    if (this.openPaths.has(change.path)) return;
+    this.hidePreview();
+    const panel = el('div', 'review-hover');
+    panel.setAttribute('role', 'tooltip');
+    const head = el('div', 'review-hover-head');
+    head.append(el('span', 'review-path', change.path));
+    const counts = el('span', 'review-row-counts');
+    counts.append(el('span', 'added', `+${change.additions}`), document.createTextNode(' '), el('span', 'removed', `−${change.deletions}`));
+    head.append(counts);
+    const body = el('div', 'review-hover-body');
+    if (change.patch) {
+      for (const line of parsePatch(change.patch)) {
+        if (line.kind === 'meta') continue;
+        body.append(el('div', `patch-line ${line.kind}`, line.text));
+      }
+    } else body.append(el('p', 'review-diff-empty', 'No patch recorded for this file.'));
+    panel.append(head, body);
+    document.body.append(panel);
+    this.hover = panel;
+    const rect = row.getBoundingClientRect();
+    const gap = 10;
+    let left = rect.right + gap;
+    if (left + panel.offsetWidth > window.innerWidth - 8) left = rect.left - panel.offsetWidth - gap;
+    left = Math.max(8, Math.min(left, window.innerWidth - panel.offsetWidth - 8));
+    const top = Math.max(8, Math.min(rect.top, window.innerHeight - panel.offsetHeight - 8));
+    panel.style.left = `${Math.round(left)}px`;
+    panel.style.top = `${Math.round(top)}px`;
+    window.addEventListener('scroll', this.dismissHover, true);
+    window.addEventListener('resize', this.dismissHover);
+    window.addEventListener('keydown', this.dismissHover);
+  }
+
+  private dismissHover = (event?: Event): void => {
+    if (event instanceof KeyboardEvent && event.key !== 'Escape') return;
+    this.hidePreview();
+  };
+
+  private hidePreview(): void {
+    window.removeEventListener('scroll', this.dismissHover, true);
+    window.removeEventListener('resize', this.dismissHover);
+    window.removeEventListener('keydown', this.dismissHover);
+    this.hover?.remove();
+    this.hover = undefined;
   }
 
   // Qoder/opencode-style preview: the unified patch inline, no editor round-trip. The full

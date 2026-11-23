@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { questionValues } from '../src/renderer/questions.js';
+import { missingAnswer, questionStep, questionValues } from '../src/renderer/questions.js';
 import type { AgentQuestion } from '../src/shared/contracts.js';
 
 type Spec = AgentQuestion['questions'][number];
@@ -42,3 +42,22 @@ test('boolean questions return protocol true and false values', () => {
   ] });
   assert.deepEqual(questionValues(bool, ['true'], ''), ['true']);
 });
+
+test('a pager labels the visible question and knows the last step', () => {
+  assert.deepEqual(questionStep(0, 2), { position: 0, label: '1 / 2', last: false });
+  assert.deepEqual(questionStep(1, 2), { position: 1, label: '2 / 2', last: true });
+  assert.deepEqual(questionStep(0, 1), { position: 0, label: '1 / 1', last: true });
+});
+
+test('a pager clamps out-of-range positions and empty totals', () => {
+  assert.deepEqual(questionStep(5, 2), { position: 1, label: '2 / 2', last: true });
+  assert.deepEqual(questionStep(-3, 2), { position: 0, label: '1 / 2', last: false });
+  assert.deepEqual(questionStep(0, 0), { position: 0, label: '1 / 1', last: true });
+});
+
+test('a required question blocks its step until answered', () => {
+  assert.equal(missingAnswer(choice({ required: true }), []), true);
+  assert.equal(missingAnswer(choice({ required: true }), ['x64']), false);
+  assert.equal(missingAnswer(choice({ required: false }), []), false);
+});
+

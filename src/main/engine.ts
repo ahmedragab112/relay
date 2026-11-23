@@ -171,10 +171,47 @@ export async function installedSkillDirectories(root: string): Promise<string[]>
   return directories.sort();
 }
 
-function providerConfig(providers: ProviderInput[], mcp: McpServer[], skillDirectories: string[] = []): string {
+/** Models whose requested output tokens Relay bounds, and the budget it asks for. */
+export interface OutputCap {
+  maxTokens: number;
+  models: string[];
+}
+
+export interface ModelOutputCap {
+  providerID: string;
+  modelID: string;
+  output: number;
+}
+
+// Models the catalog already bounds below the budget are left untouched; capping them
+// could raise their real limit. Ids outside the catalog get the budget so they never
+// fall back to the engine's 128k default.
+export function modelOutputCaps(cap: OutputCap, catalog: Map<string, number>): ModelOutputCap[] {
+  const budget = Math.max(1, Math.round(cap.maxTokens));
+  const seen = new Set<string>();
+  const caps: ModelOutputCap[] = [];
+  for (const id of cap.models) {
+    const [providerID, ...rest] = id.split('::');
+    const modelID = rest.join('::');
+    if (!providerID || !modelID || seen.has(id)) continue;
+    seen.add(id);
+    const known = catalog.get(id);
+    if (known !== undefined && known <= budget) continue;
+    caps.push({ providerID, modelID, output: budget });
+  }
+  return caps;
+}
+
+function providerConfig(providers: ProviderInput[], mcp: McpServer[], skillDirectories: string[] = [], outputCaps: ModelOutputCap[] = []): string {
   const configured = Object.fromEntries(providers.map((provider) => {
     const preset = providerPreset(provider.id);
-    const models = provider.models?.length ? Object.fromEntries(provider.models.map((model) => [model, { name: model }])) : undefined;
+    const entries = new Map<string, { name: string; limit?: { output: number } }>();
+    for (const model of provider.models ?? []) entries.set(model, { name: model });
+    for (const cap of outputCaps) {
+      if (cap.providerID !== provider.id) continue;
+      entries.set(cap.modelID, { name: entries.get(cap.modelID)?.name ?? cap.modelID, limit: { output: cap.output } });
+    }
+    const models = entries.size ? Object.fromEntries(entries) : undefined;
     return [provider.id, {
       name: provider.id, package: preset?.package,
       settings: {
@@ -241,6 +278,8 @@ export class Engine {
   private autoSessions = new Map<string, { settings?: AutoSettings; tried: Set<string>; current?: string }>();
   // Sessions created but not yet prompted: their first message carries the Atlas index.
   private freshSessions = new Map<string, string>();
+  // App-wide Knowledge index, injected into the first message of each new session.
+  private knowledgeIndex?: () => Promise<string | undefined>;
   // Atlas build sessions are not chats; every listing filters them out.
   private hiddenSessions = new Set<string>();
   // Hidden runs that also answer their own approvals and questions instead of surfacing them.
@@ -300,13 +339,21 @@ export class Engine {
   private compacting = new Set<string>();
   private attention?: AttentionLog;
   private skillsDirectory = '';
+  private outputCap?: OutputCap;
+  private outputCapKey = '';
+  private outputCaps: ModelOutputCap[] = [];
+  private configWrites: Promise<void> = Promise.resolve();
 
   constructor(private readonly root: string, private readonly cli: string, private readonly emit: (event: AppEvent) => void, private readonly browser?: EngineBrowserHooks) {}
 
-  async start(directory: string, providers: ProviderInput[], mcp: McpServer[], workspaces: string[] = []): Promise<void> {
+  async start(directory: string, providers: ProviderInput[], mcp: McpServer[], workspaces: string[] = [], outputCap?: OutputCap): Promise<void> {
     await this.stop();
     this.stopped = false;
     this.directory = directory; this.providers = providers; this.mcp = mcp;
+    this.outputCap = outputCap && outputCap.maxTokens > 0 ? outputCap : undefined;
+    this.outputCapKey = JSON.stringify(this.outputCap ?? null);
+    this.outputCaps = [];
+    this.configWrites = Promise.resolve();
     this.freshSessions.clear();
     this.workspaces = [...new Set(workspaces.filter((path) => path && path !== directory))];
     await this.loadLimits();
@@ -346,6 +393,7 @@ export class Engine {
       this.status = { state: 'ready', detail: directory, version: info.version };
       this.emit({ type: 'engine', status: this.status });
       this.subscribe();
+      void this.refreshOutputCaps();
     } catch (error) {
       this.stopped = true; child.kill(); this.child = undefined;
       await this.discardConfig();
@@ -381,11 +429,71 @@ export class Engine {
     if (path && !this.keepConfig) await unlink(path).catch(() => {});
   }
 
+  // Bounds the output tokens every request asks for. The engine hot-reloads the
+  // config file, so a changed budget lands without restarting the sidecar.
+  setOutputCap(cap?: OutputCap): void {
+    const next = cap && cap.maxTokens > 0 ? { maxTokens: cap.maxTokens, models: [...cap.models] } : undefined;
+    const key = JSON.stringify(next ?? null);
+    if (key === this.outputCapKey) return;
+    this.outputCapKey = key;
+    this.outputCap = next;
+    if (!this.stopped && this.configPath) void this.refreshOutputCaps();
+  }
+
+  private async refreshOutputCaps(): Promise<void> {
+    if (this.stopped || !this.configPath) return;
+    const caps = this.outputCap && this.outputCap.models.length
+      ? modelOutputCaps(this.outputCap, await this.catalogOutputs().catch(() => new Map<string, number>()))
+      : [];
+    if (JSON.stringify(caps) === JSON.stringify(this.outputCaps)) return;
+    this.outputCaps = caps;
+    await this.writeConfig();
+  }
+
+  // Models can come from the live catalog (auto rotation, an explicit pick), so their
+  // caps are added right before the prompt runs and the write waits until the engine sees them.
+  private async ensureOutputCaps(ids: string[]): Promise<void> {
+    if (this.stopped || !this.outputCap) return;
+    const capped = new Set(this.outputCaps.map((cap) => `${cap.providerID}::${cap.modelID}`));
+    const missing = ids.filter((id) => id && !capped.has(id));
+    if (!missing.length) return;
+    const catalog = await this.catalogOutputs().catch(() => new Map<string, number>());
+    const caps = modelOutputCaps({ maxTokens: this.outputCap.maxTokens, models: missing }, catalog);
+    if (!caps.length) return;
+    this.outputCaps = [...this.outputCaps, ...caps];
+    await this.writeConfig();
+    const budget = this.outputCap.maxTokens;
+    for (let attempt = 0; attempt < 6; attempt++) {
+      const loaded = await this.catalogOutputs().catch(() => undefined);
+      if (!loaded || caps.every((cap) => (loaded.get(`${cap.providerID}::${cap.modelID}`) ?? 0) <= budget)) return;
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+  }
+
+  private async catalogOutputs(): Promise<Map<string, number>> {
+    const response = await retryActivation(() => this.client.model.list({ location: { directory: this.directory } }));
+    const outputs = new Map<string, number>();
+    for (const model of response.data) {
+      const output = (model as unknown as { limit?: { output?: number } }).limit?.output;
+      if (typeof output === 'number' && output > 0) outputs.set(`${model.providerID}::${model.modelID}`, output);
+    }
+    return outputs;
+  }
+
+  private writeConfig(): Promise<void> {
+    const write = async () => {
+      if (this.stopped || !this.configPath) return;
+      const directories = await installedSkillDirectories(this.skillsDirectory);
+      await writeFile(this.configPath, providerConfig(this.providers, this.mcp, directories, this.outputCaps), { mode: 0o600 });
+      await chmod(this.configPath, 0o600);
+    };
+    this.configWrites = this.configWrites.then(write, write);
+    return this.configWrites;
+  }
+
   async refreshSkills(expected: string[] = []): Promise<void> {
     if (this.stopped || !this.configPath) return;
-    const directories = await installedSkillDirectories(this.skillsDirectory);
-    await writeFile(this.configPath, providerConfig(this.providers, this.mcp, directories), { mode: 0o600 });
-    await chmod(this.configPath, 0o600);
+    await this.writeConfig();
     if (expected.length) {
       for (let attempt = 0; attempt < 25; attempt++) {
         const loaded = await this.listSkills().catch(() => []);
@@ -711,6 +819,7 @@ export class Engine {
     entry.tried.add(next.id);
     entry.current = next.id;
     try {
+      await this.ensureOutputCaps([next.id]).catch(() => undefined);
       await this.switchModelOnly(sessionId, next.id, next.variant);
       this.emit({ type: 'auto-switched', sessionId, model: next.id, detail });
       await this.client.session.prompt({
@@ -725,6 +834,8 @@ export class Engine {
     }
   }
 
+  setKnowledgeIndex(provider: () => Promise<string | undefined>): void { this.knowledgeIndex = provider; }
+
   async sendMessage(input: SendMessageInput): Promise<void> {
     const access = input.planOnly ? 'read' : input.access;
     const files = await Promise.all(input.files.map((path) => readAttachment(this.directory, path)));
@@ -737,10 +848,12 @@ export class Engine {
     const context: ContextBlock[] = Array.isArray(input.context) ? input.context : [];
     const freshDirectory = this.freshSessions.get(input.sessionId);
     const atlasIndex = freshDirectory ? await loadAtlasIndex(freshDirectory).catch(() => undefined) : undefined;
+    const knowledgeIndex = freshDirectory ? await this.knowledgeIndex?.().catch(() => undefined) : undefined;
     const projectInstructions = await loadProjectInstructions(this.directory);
     const withProjectInstructions: ContextBlock[] = [
       ...(projectInstructions ? [{ label: `Project instructions — ${projectInstructions.label}`, text: projectInstructions.text }] : []),
       ...(atlasIndex ? [{ label: 'Atlas — project knowledge', text: atlasIndex }] : []),
+      ...(knowledgeIndex ? [{ label: 'Knowledge — saved library', text: knowledgeIndex }] : []),
       ...context,
     ];
     const composed = composeMessage(input.text, withProjectInstructions);
@@ -765,6 +878,8 @@ export class Engine {
     }
 
     if (!candidates.length) throw new Error('No connected model available. Configure a provider in Settings.');
+
+    await this.ensureOutputCaps(candidates.map((candidate) => candidate.id)).catch(() => undefined);
 
     let lastError: unknown;
     for (const candidate of candidates) {

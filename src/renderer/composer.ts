@@ -6,8 +6,9 @@ import { resolveInitialModel } from './state';
 import { groupModels, resolveVariant, variantLabel } from './model-menu';
 import { resetLabel } from '../shared/limits';
 import { Dictation } from './dictation';
-import { atlasMention, filterMentionables, parseMentionToken, type MentionSource } from './mention';
+import { atlasMention, filterMentionables, knowledgeMention, parseMentionToken, type MentionSource } from './mention';
 import { ATLAS_LANGUAGE_KEY, ATLAS_ROOT, isAtlasLanguage, type AtlasCard, type AtlasLanguage, type AtlasPage } from '../shared/atlas';
+import type { KnowledgeMeta } from '../shared/knowledge';
 
 const KNOWLEDGE_COMMAND: CommandOption = { name: 'knowledge', description: 'Attach Atlas pages or module cards to this message' };
 const atlasLocation = (language: AtlasLanguage, slug: string): string => `${ATLAS_ROOT}/${language}/${slug}.md`;
@@ -83,7 +84,6 @@ export class Composer {
   private modelLabel = byId('model-label');
   private modelMenu = byId('model-menu');
   private access = byId<HTMLSelectElement>('access-select');
-  private free = byId<HTMLButtonElement>('free-toggle');
   private send = byId<HTMLButtonElement>('send-message');
   private interrupt = byId<HTMLButtonElement>('interrupt');
   private session?: SessionSummary;
@@ -94,7 +94,6 @@ export class Composer {
   private sending = new Set<string>();
   private stopping = new Set<string>();
   private drafts = new Map<string, Draft>();
-  private preserved?: Draft;
   private files: ComposerAttachment[] = [];
   private skills: SkillOption[] = [];
   private selectedSkills: string[] = [];
@@ -212,11 +211,6 @@ export class Composer {
       if (!session) return;
       void window.relay.setSessionAccess(session.id, value)
         .catch(error => report('Access level did not reach the running task', error));
-    });
-    this.free.addEventListener('click', () => {
-      this.freeOnly = !this.freeOnly;
-      this.renderModels(this.modelId);
-      this.sync();
     });
   }
 
@@ -344,8 +338,6 @@ export class Composer {
   private clearSkillSuggestions(): void { byId('skill-suggestions').replaceChildren(); }
 
   reset(): void {
-    const previous = this.session?.id;
-    const preserved = this.preserved; this.preserved = undefined;
     this.workspaceGeneration++;
     this.dictation.cancel();
     this.drafts.clear(); this.sending.clear(); this.stopping.clear(); this.session = undefined;
@@ -354,22 +346,6 @@ export class Composer {
     this.commands = []; this.command = ''; this.closeMenu(); this.clearSkillSuggestions();
     this.closeMentionMenu(); this.mentionCache = undefined;
     this.renderFiles(); this.renderSkills(); this.renderCommands(); this.renderTags(); this.sync();
-    if (preserved && previous) this.drafts.set(previous, preserved);
-  }
-
-  /** Keeps the unfinished message through the next reset, e.g. when the task's folder changes. */
-  preserve(): void { this.preserved = this.readDraft(); }
-
-  /** Drops a preserved draft when the folder did not actually change. */
-  cancelPreserved(): void { this.preserved = undefined; }
-
-  /** Hands a preserved draft to the task that replaced it after a folder switch. */
-  carry(from: string): void {
-    const draft = this.drafts.get(from);
-    if (!draft || !this.session) return;
-    this.drafts.delete(from);
-    this.drafts.set(this.session.id, draft);
-    this.applyDraft(draft);
   }
 
   private readDraft(): Draft {
@@ -406,7 +382,6 @@ export class Composer {
   setModels(models: ModelOption[], preferred: string): void {
     this.models = models;
     if (!models.some(model => model.free)) this.freeOnly = false;
-    this.free.hidden = !models.some(model => model.free);
     this.renderModels(preferred);
   }
 
@@ -418,8 +393,6 @@ export class Composer {
     // Auto sticks once active (fresh boot without a saved preference, or the user picked Auto);
     // it only ends on an explicit model pick (pickModel/pickPower set autoModel = false).
     if (!this.autoModel) this.autoModel = resolved.autoModel;
-    this.free.setAttribute('aria-pressed', String(this.freeOnly));
-    this.free.textContent = this.freeOnly ? 'Free only' : 'All models';
     this.renderModelLabel();
     if (this.modelMenuOpen) this.renderModelMenu();
     this.sync();
@@ -441,14 +414,17 @@ export class Composer {
   }
 
   private renderModelMenu(): void {
+    const hasFree = this.models.some(model => model.free);
     const groups = groupModels(this.models, this.freeOnly);
+    const rows: HTMLElement[] = [];
+    if (hasFree) rows.push(this.modelScopeRow());
     if (!groups.length) {
-      this.modelMenu.replaceChildren(el('p', 'model-empty', this.freeOnly
-        ? 'No free models are connected. Turn off Free only to see every model.'
+      rows.push(el('p', 'model-empty', this.freeOnly
+        ? 'No free models are connected. Choose All models to see every model.'
         : 'No models are connected yet. Add a provider in Settings.'));
+      this.modelMenu.replaceChildren(...rows);
       return;
     }
-    const rows: HTMLElement[] = [];
     // Auto entry at the top: Relay picks the best available model and rotates away from limits.
     const autoEntry = el('div', `model-entry${this.autoModel ? ' selected' : ''}`);
     const autoRow = button('', () => this.pickAuto(), `model-option${this.autoModel ? ' selected' : ''}`);
@@ -464,6 +440,26 @@ export class Composer {
       for (const model of group.models) rows.push(this.modelEntry(model));
     }
     this.modelMenu.replaceChildren(...rows);
+  }
+
+  private modelScopeRow(): HTMLElement {
+    const row = el('div', 'model-scope');
+    row.setAttribute('role', 'group');
+    row.setAttribute('aria-label', 'Models to show');
+    for (const [label, freeOnly] of [['All models', false], ['Free only', true]] as const) {
+      const chip = button(label, () => this.toggleFreeOnly(freeOnly), `model-scope-option${this.freeOnly === freeOnly ? ' selected' : ''}`);
+      chip.type = 'button';
+      chip.setAttribute('aria-pressed', String(this.freeOnly === freeOnly));
+      row.append(chip);
+    }
+    return row;
+  }
+
+  private toggleFreeOnly(freeOnly: boolean): void {
+    if (this.freeOnly === freeOnly) return;
+    this.freeOnly = freeOnly;
+    this.renderModels(this.modelId);
+    this.modelMenu.querySelector<HTMLElement>('.model-scope-option[aria-pressed="true"]')?.focus();
   }
 
   private modelEntry(model: ModelOption): HTMLElement {
@@ -753,6 +749,64 @@ export class Composer {
     else notify(`Attached ${attached} Atlas ${attached === 1 ? 'source' : 'sources'}.`);
   }
 
+  pickLibrary(): void {
+    if (!this.session) { notify('Open a task before attaching Knowledge sources.', true); return; }
+    const modal = dialog('Knowledge library');
+    modal.add(el('p', '', 'Attach saved sources — notes, files, and links, shared by every task — to your next message.'));
+    const body = el('div');
+    body.append(el('p', 'small muted', 'Loading Knowledge…'));
+    modal.add(body);
+    void window.relay.knowledgeList().then(sources => {
+      if (!sources.length) {
+        body.replaceChildren(el('p', '', 'Knowledge has no sources yet. Open Toolkit → Knowledge to add a note, file, or link.'));
+        return;
+      }
+      const picked = new Set<string>();
+      const list = el('div', 'knowledge-pick');
+      for (const source of sources) {
+        const choice = el('label', 'choice');
+        const input = el('input');
+        input.type = 'checkbox';
+        input.addEventListener('change', () => { if (input.checked) picked.add(source.id); else picked.delete(source.id); });
+        const copy = el('span');
+        const kind = source.kind === 'note' ? 'Note' : source.kind === 'file' ? 'File' : 'Link';
+        copy.append(el('strong', '', source.title), el('small', '', source.origin ? `${kind} · ${source.origin}` : kind));
+        choice.append(input, copy);
+        list.append(choice);
+      }
+      const actions = el('div', 'dialog-actions');
+      actions.append(
+        button('Cancel', () => modal.root.close()),
+        button('Attach', () => void this.attachLibrary(modal, sources, picked), 'button primary'),
+      );
+      body.replaceChildren(list, actions);
+    }).catch(error => body.replaceChildren(el('p', 'inline-error', errorText(error))));
+  }
+
+  private async attachLibrary(modal: ReturnType<typeof dialog>, sources: KnowledgeMeta[], picked: Set<string>): Promise<void> {
+    if (!picked.size) { notify('Choose at least one source.', true); return; }
+    modal.busy(true);
+    let attached = 0;
+    let skipped = 0;
+    for (const source of sources) {
+      if (!picked.has(source.id)) continue;
+      if (this.contextBlocks.length >= 4) { skipped++; continue; }
+      try {
+        const text = await window.relay.knowledgeRead(source.id);
+        if (!text.trim()) { skipped++; continue; }
+        this.contextBlocks.push({ label: `Knowledge: ${source.title}`, text });
+        attached++;
+      } catch { skipped++; }
+    }
+    this.renderTags();
+    this.sync();
+    modal.busy(false);
+    modal.root.close();
+    this.input.focus();
+    if (skipped) notify(`Attached ${attached}. Remove a context tag before adding the rest.`, attached === 0);
+    else notify(`Attached ${attached} Knowledge ${attached === 1 ? 'source' : 'sources'}.`);
+  }
+
   attach(path: string): void {
     if (!this.session) return;
     this.mergeAttachments([attachmentFromPath(path)]);
@@ -1019,8 +1073,10 @@ export class Composer {
     const files = await window.relay.searchFiles(token.query, 'files').catch(() => []);
     if (generation !== this.mentionGeneration) return;
     const atlas = atlasMention(token.query);
+    const knowledge = knowledgeMention(token.query);
     const sources: MentionSource[] = [
       ...(atlas ? [atlas] : []),
+      ...(knowledge ? [knowledge] : []),
       ...files.slice(0, 6).map(result => ({
         kind: 'file' as const, id: result.path,
         name: result.path.split('/').pop() || result.path, detail: result.path, path: result.path,
@@ -1052,7 +1108,7 @@ export class Composer {
   }
 
   private renderMentionMenu(): void {
-    const labels: Record<MentionSource['kind'], string> = { atlas: 'Atlas', file: 'Files', skill: 'Skills', plugin: 'Plugins', agent: 'Agents', connector: 'Connectors' };
+    const labels: Record<MentionSource['kind'], string> = { atlas: 'Atlas', knowledge: 'Knowledge', file: 'Files', skill: 'Skills', plugin: 'Plugins', agent: 'Agents', connector: 'Connectors' };
     const rows: HTMLElement[] = [];
     let lastKind = '';
     this.mentionSources.forEach((source, index) => {
@@ -1091,6 +1147,10 @@ export class Composer {
     this.closeMentionMenu();
     if (source.kind === 'atlas') {
       this.pickKnowledge();
+      return;
+    }
+    if (source.kind === 'knowledge') {
+      this.pickLibrary();
       return;
     }
     if (!this.session) { this.sync(); return; }
@@ -1153,7 +1213,6 @@ export class Composer {
     this.modelButton.disabled = this.preferenceSaving || !this.models.some(model => model.connected);
     if (this.modelButton.disabled) this.closeModelMenu();
     this.access.disabled = this.preferenceSaving;
-    this.free.disabled = !this.models.some(model => model.free);
     this.send.disabled = !ready || (this.autoModel ? !this.models.some(model => model.connected) : !this.modelId) || (!this.input.value.trim() && !this.command) || blocked;
     this.interrupt.hidden = !running;
     this.interrupt.disabled = this.stopping.has(id) || !this.ready;

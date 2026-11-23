@@ -87,10 +87,6 @@
           <div id="attachments" class="attachments file-cards" aria-label="Attachments"></div>
           <textarea id="prompt" rows="3" aria-label="Message the agent" data-i18n-placeholder="composer.placeholder" placeholder="Describe what you’d like to build…" disabled></textarea>
           <div class="composer-actions">
-            <div class="scope-wrap">
-              <button type="button" id="scope-chip" class="scope-chip" title="Task folder" aria-label="Task folder" aria-haspopup="menu" aria-expanded="false" hidden></button>
-              <div id="scope-menu" class="plus-menu scope-menu" role="menu" aria-label="Task folder" hidden></div>
-            </div>
             <div class="plus-wrap">
               <button type="button" id="attach-file" class="icon-button plus-button" title="Add context" aria-label="Add context" aria-haspopup="menu" aria-expanded="false">＋</button>
               <div id="plus-menu" class="plus-menu" role="menu" aria-label="Add context" hidden></div>
@@ -98,7 +94,6 @@
             <button type="button" id="attach-files" class="icon-button paperclip-button" title="Attach files" aria-label="Attach files" disabled>
               <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m20.5 11.5-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.5-2.5l7.6-7.6"/></svg>
             </button>
-            <button type="button" id="free-toggle" class="free-toggle" aria-pressed="false" hidden>All models</button>
             <select id="access-select" class="access-select" aria-label="Level of access" data-access="ask">
               <option value="read">Read only</option>
               <option value="ask">Ask before acting</option>
@@ -162,15 +157,13 @@
             <span class="design-tile-icon" aria-hidden="true">◧</span>
             <span class="design-tile-copy"><strong>Design System</strong><small>Colors, type and shape for this project</small></span>
           </button>
-          <button class="design-tile soon" type="button" disabled>
+          <button id="design-tile-slides" class="design-tile" type="button">
             <span class="design-tile-icon" aria-hidden="true">▶</span>
             <span class="design-tile-copy"><strong>Slides</strong><small>Decks from an outline</small></span>
-            <span class="design-soon">Soon</span>
           </button>
-          <button class="design-tile soon" type="button" disabled>
+          <button id="design-tile-whiteboard" class="design-tile" type="button">
             <span class="design-tile-icon" aria-hidden="true">▦</span>
             <span class="design-tile-copy"><strong>Whiteboard</strong><small>Sketch flows and ideas</small></span>
-            <span class="design-soon">Soon</span>
           </button>
           <button id="design-tile-motion" class="design-tile" type="button">
             <span class="design-tile-icon" aria-hidden="true">◎</span>
@@ -191,8 +184,21 @@
           </div>
           <div id="design-turns" class="design-turns"></div>
           <form id="design-prompt-form" class="design-prompt">
-            <textarea id="design-prompt" rows="4" maxlength="8000" placeholder="Describe an idea and turn it into a design…" required></textarea>
+            <p id="design-queue" class="design-queue" hidden></p>
+            <div id="design-suggestions" class="design-suggestions" aria-label="Suggested next steps"></div>
+            <div id="design-mention-menu" class="command-menu" role="listbox" aria-label="Files, skills and tools" hidden></div>
+            <div id="design-chips" class="attachments design-chips" aria-label="Tools for this design turn"></div>
+            <textarea id="design-prompt" rows="4" maxlength="8000" placeholder="Describe an idea and turn it into a design… Type @ for files, skills and tools" required></textarea>
             <div class="design-prompt-actions">
+              <div class="plus-wrap">
+                <button id="design-plus" type="button" class="icon-button plus-button" title="Add context" aria-label="Add context" aria-haspopup="menu" aria-expanded="false">＋</button>
+                <div id="design-plus-menu" class="plus-menu" role="menu" aria-label="Add context" hidden></div>
+              </div>
+              <button id="design-attach" type="button" class="icon-button paperclip-button" title="Attach files" aria-label="Attach files">
+                <svg viewBox="0 0 24 24" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m20.5 11.5-8.6 8.6a5 5 0 0 1-7.1-7.1l8.2-8.2a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.2a1.8 1.8 0 0 1-2.5-2.5l7.6-7.6"/></svg>
+              </button>
+              <span class="design-tools-hint">@ files · skills · tools</span>
+              <span class="grow"></span>
               <button id="design-cancel" class="button" type="button" hidden>Stop</button>
               <button id="design-send" class="button primary" type="submit">Generate</button>
             </div>
@@ -206,12 +212,29 @@
               <button id="design-viewport-phone" class="design-viewport" aria-pressed="false">Phone</button>
             </div>
             <span class="grow"></span>
+            <span id="design-updated" class="design-updated" hidden>Updated</span>
             <select id="design-versions" aria-label="Versions"></select>
             <button id="design-restore" class="button" disabled>Restore</button>
             <button id="design-save-version" class="button">Save version</button>
+            <button id="design-edit" class="icon-button design-pick" aria-pressed="false" aria-label="Edit text in the preview" title="Edit text directly in the preview">
+              <svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4.5L19 9.5a2.1 2.1 0 0 0-3-3L5.5 17z"/><path d="M14.5 6.5l3 3"/></svg>
+            </button>
+            <button id="design-save-edit" class="button primary" hidden>Save changes</button>
+            <button id="design-pick" class="icon-button design-pick" aria-pressed="false" aria-label="Select an element in the preview" title="Select an element to attach it to the prompt">
+              <svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="4"/><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/></svg>
+            </button>
+            <button id="design-comments" class="icon-button design-comments" aria-label="Review comments" title="Review comments">
+              <svg viewBox="0 0 24 24" aria-hidden="true" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5h16v11H9l-4 4z"/></svg>
+              <span id="design-comments-count" class="design-comments-badge" hidden></span>
+            </button>
+            <button id="design-export" class="icon-button" aria-label="Export design" title="Export design">⤓</button>
+            <button id="design-code" class="icon-button" aria-label="Copy page HTML" title="Copy page HTML">&lt;/&gt;</button>
+            <button id="design-open" class="icon-button" aria-label="Open preview in browser" title="Open preview in browser">↗</button>
+            <button id="design-fullscreen" class="icon-button" aria-pressed="false" aria-label="Fullscreen preview" title="Fullscreen preview">⤢</button>
             <button id="design-reload" class="icon-button" aria-label="Reload preview" title="Reload preview">↻</button>
             <button id="design-reveal" class="icon-button" aria-label="Show design folder" title="Show design folder">▤</button>
           </div>
+          <div id="design-artboards" class="design-artboards" role="tablist" aria-label="Screens"></div>
           <div id="design-preview-frame" class="design-preview-frame" data-viewport="desktop">
             <iframe id="design-preview" class="design-preview" title="Design preview" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe>
           </div>
@@ -306,6 +329,7 @@
         <button id="tools-tab-plugins" class="tab" role="tab" aria-selected="false" tabindex="-1" data-i18n="toolkit.plugins">Plugins</button>
         <button id="tools-tab-connectors" class="tab" role="tab" aria-selected="false" tabindex="-1" data-i18n="toolkit.connectors">Connectors</button>
         <button id="tools-tab-atlas" class="tab" role="tab" aria-selected="false" tabindex="-1">Atlas</button>
+        <button id="tools-tab-knowledge" class="tab" role="tab" aria-selected="false" tabindex="-1">Knowledge</button>
       </div>
       <div id="tools-toolbar" class="tools-toolbar">
         <input id="tools-search" class="tools-search" type="search" autocomplete="off" spellcheck="false" aria-label="Search tasks, projects, skills, plugins, and connectors">
@@ -357,6 +381,29 @@
           <article id="atlas-reader" class="atlas-reader" aria-live="polite"></article>
         </div>
       </div>
+      </div>
+      <div id="knowledge-panel" class="knowledge-panel" hidden>
+        <div class="knowledge-toolbar">
+          <button id="knowledge-add-note" class="button primary" type="button">New note</button>
+          <button id="knowledge-add-file" class="button" type="button">Add files…</button>
+          <button id="knowledge-add-link" class="button" type="button">Add link…</button>
+          <span class="grow"></span>
+          <input id="knowledge-search" class="tools-search knowledge-search" type="search" autocomplete="off" spellcheck="false" aria-label="Search saved sources" placeholder="Search sources">
+          <button id="knowledge-reveal" class="atlas-link" type="button" title="Show the Knowledge folder on disk">Show folder</button>
+        </div>
+        <p id="knowledge-summary" class="atlas-summary">Saved sources, shared by every task in every folder.</p>
+        <div class="knowledge-layout">
+          <nav id="knowledge-list" class="knowledge-list" aria-label="Saved sources"></nav>
+          <div class="knowledge-main">
+            <div class="atlas-page-bar">
+              <span id="knowledge-title-label" class="atlas-page-label"></span>
+              <span class="grow"></span>
+              <button id="knowledge-attach" class="button" type="button" hidden>Attach to task</button>
+              <button id="knowledge-delete" class="button danger" type="button" hidden>Delete</button>
+            </div>
+            <article id="knowledge-reader" class="atlas-reader knowledge-reader" aria-live="polite"></article>
+          </div>
+        </div>
       </div>
     </section>
     <div id="inspector-resizer" class="inspector-resizer" role="separator" aria-orientation="vertical" aria-label="Resize project inspector" aria-controls="inspector" title="Drag to resize · double-click to hide the inspector" tabindex="0"></div>

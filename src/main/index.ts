@@ -9,9 +9,10 @@ import type {
   AccessLevel, AgentMode, AppEvent, AppState, AutomationJob, AutomationState, ContextBlock, McpServer, PermissionDecision, PluginCatalogEntry, PluginView, PreferencesPatch, ProviderInput, RunCommandInput, SendMessageInput, StagedAttachment,
 } from '../shared/contracts.js';
 import { SCRATCH_WORKSPACE_ID } from '../shared/contracts.js';
-import { Engine, type EngineBrowserHooks } from './engine.js';
+import { Engine, type EngineBrowserHooks, type OutputCap } from './engine.js';
 import { startBrowserHost, type BrowserHost, type BrowserPageDriver, type BrowserRpc } from './browser.js';
 import { createBrowserDriver } from './browser-page.js';
+import { startPreviewServer, type PreviewServer } from './preview-server.js';
 import { finishAlert } from './alerts.js';
 import { AutomationStore, Scheduler, validateJobInput } from './schedules.js';
 import { transcribe, transcriptionTarget, validateAudio } from './dictation.js';
@@ -32,7 +33,10 @@ import { startControlServer } from './control.js';
 import { Updates } from './updater.js';
 import { HistoryIndex } from './history.js';
 import { AtlasRunner } from './atlas.js';
+import { KnowledgeStore } from './knowledge.js';
+import { loadKnowledgeIndex } from './knowledge-index.js';
 import { designSessionIds, Designs } from './design.js';
+import { DESIGN_ENTRY, designTitle } from '../shared/design.js';
 import { Motions } from './motion.js';
 import { exportMotion } from './motion-export.js';
 import { motionStage } from '../shared/motion.js';
@@ -50,8 +54,10 @@ let scheduler: Scheduler;
 let updates: Updates;
 let history: HistoryIndex;
 let atlas: AtlasRunner;
+let knowledge: KnowledgeStore;
 let designs: Designs;
 let motions: Motions;
+let designPreview: Promise<PreviewServer> | undefined;
 let exportingMotion = false;
 let historyTimer: NodeJS.Timeout | undefined;
 let historyPendingFull = false;
@@ -165,6 +171,11 @@ function prepareBrowserSession(): void {
   isolated.on('will-download', event => event.preventDefault());
 }
 
+function designPreviewBase(): Promise<string> {
+  designPreview ??= startPreviewServer(async (path) => designs ? designs.servePreview(path) : undefined);
+  return designPreview.then((server) => server.url);
+}
+
 function emit(event: AppEvent): void {
   observeHistory(event);
   let delivered: AppEvent = event;
@@ -269,6 +280,12 @@ function announceAutomation(): void {
   emit({ type: 'automation', jobs: automation.jobs, runs: automation.runs });
 }
 
+// The models Relay may run: the one picked for chat plus auto's allowed models.
+function outputCapPreference(): OutputCap {
+  const { maxTokens, modelIds } = store.preferences.auto;
+  return { maxTokens, models: [store.preferences.defaultModel, ...modelIds].filter(Boolean) };
+}
+
 async function restart(): Promise<void> {
   const previous = restarting;
   restarting = (async () => {
@@ -288,7 +305,7 @@ async function restart(): Promise<void> {
     }
     try {
       const mcp = mergeMcpServers(store.mcp, await plugins.mcpServers(store.plugins));
-      await engine.start(workspace.path, providers, mcp, store.workspaces.map((item) => item.path));
+      await engine.start(workspace.path, providers, mcp, store.workspaces.map((item) => item.path), outputCapPreference());
     }
     catch { /* engine.status carries the actionable failure */ }
   })();
@@ -530,6 +547,7 @@ function register(): void {
     await store.savePreferences(values as PreferencesPatch);
     const context = store.preferences.context;
     engine.setAutoCompact(context.autoCompact, context.compactThreshold);
+    engine.setOutputCap(outputCapPreference());
     updates?.setAutoCheck(store.preferences.general.autoUpdate);
     return state();
   });
@@ -659,10 +677,43 @@ function register(): void {
     const failure = await shell.openPath(target);
     if (failure) throw new Error(failure || 'The Atlas folder could not be opened.');
   });
+  define('knowledge:list', async () => knowledge.list());
+  define('knowledge:read', async (_event, id) => knowledge.read(text(id, 'Knowledge source', 64)));
+  define('knowledge:add-note', async (_event, input) => {
+    const value = (input && typeof input === 'object' ? input : {}) as { title?: unknown; text?: unknown };
+    const title = value.title === undefined || value.title === null ? undefined : text(value.title, 'Title', 120);
+    await knowledge.addNote(title, text(value.text, 'Note', 200_000));
+    return knowledge.list();
+  });
+  define('knowledge:add-file', async () => {
+    if (!window || window.isDestroyed()) throw new Error('The window is not available.');
+    const chosen = await dialog.showOpenDialog(window, {
+      title: 'Add files to Knowledge',
+      buttonLabel: 'Add to Knowledge',
+      properties: ['openFile', 'multiSelections'],
+    });
+    if (chosen.canceled || !chosen.filePaths.length) return { sources: await knowledge.list(), skipped: [] };
+    const result = await knowledge.addFiles(chosen.filePaths);
+    if (!result.added) throw new Error(result.skipped[0] ?? 'Nothing was added.');
+    return { sources: await knowledge.list(), skipped: result.skipped };
+  });
+  define('knowledge:add-link', async (_event, url) => {
+    await knowledge.addLink(text(url, 'Link', 2048));
+    return knowledge.list();
+  });
+  define('knowledge:remove', async (_event, id) => {
+    await knowledge.remove(text(id, 'Knowledge source', 64));
+    return knowledge.list();
+  });
+  define('knowledge:reveal', async () => {
+    await mkdir(knowledge.directory, { recursive: true, mode: 0o700 });
+    const failure = await shell.openPath(knowledge.directory);
+    if (failure) throw new Error(failure || 'The Knowledge folder could not be opened.');
+  });
   define('design:view', async () => designs.view());
-  define('design:create', async (_event, name) => designs.create(text(name, 'Design name', 80)));
-  define('design:send', async (_event, slug, body) =>
-    designs.send(text(slug, 'Design', 64), text(body, 'Design request', 8000)));
+  define('design:create', async (_event, name, kind) => designs.create(text(name, 'Design name', 80), kind));
+  define('design:send', async (_event, slug, body, extras) =>
+    designs.send(text(slug, 'Design', 64), text(body, 'Design request', 8000), extras));
   define('design:snapshot', async (_event, slug) => designs.snapshotNow(text(slug, 'Design', 64)));
   define('design:versions', async (_event, slug) => designs.versions(text(slug, 'Design', 64)));
   define('design:restore', async (_event, slug, version) => {
@@ -670,9 +721,18 @@ function register(): void {
     if (!Number.isSafeInteger(number) || number < 1) throw new Error('That version is not valid.');
     return designs.restore(text(slug, 'Design', 64), number);
   });
+  define('design:pages', async (_event, slug) => designs.pages(text(slug, 'Design', 64)));
+  define('design:page-add', async (_event, slug, name) =>
+    designs.addPage(text(slug, 'Design', 64), text(name, 'Page name', 80)));
+  define('design:page-save', async (_event, slug, file, html) =>
+    designs.savePage(text(slug, 'Design', 64), text(file, 'Page', 256), text(html, 'Page', 1024 * 1024)));
   define('design:set-model', async (_event, slug, model) =>
     designs.setModel(text(slug, 'Design', 64), typeof model === 'string' ? model.slice(0, 512) : ''));
   define('design:save-system', async (_event, system) => designs.saveSystem(system));
+  define('design:system-save', async (_event, system) => designs.saveLibrarySystem(system));
+  define('design:set-system', async (_event, slug, id) =>
+    designs.setDesignSystem(text(slug, 'Design', 64), typeof id === 'string' ? text(id, 'Design system', 64) : ''));
+  define('design:system-delete', async (_event, id) => designs.deleteLibrarySystem(text(id, 'Design system', 64)));
   define('design:implement', async (_event, slug) => designs.implement(text(slug, 'Design', 64)));
   define('design:reveal', async (_event, slug) => {
     const folder = await designs.reveal(text(slug, 'Design', 64));
@@ -680,6 +740,58 @@ function register(): void {
     if (failure) throw new Error(failure || 'The design folder could not be opened.');
   });
   define('design:cancel', async (_event, slug) => designs.cancel(text(slug, 'Design', 64)));
+  define('design:code', async (_event, slug, file) =>
+    designs.code(text(slug, 'Design', 64), file === undefined || file === null ? undefined : text(file, 'Page', 256)));
+  define('design:open-preview', async (_event, slug, file) => {
+    const clean = text(slug, 'Design', 64);
+    const page = file === undefined || file === null ? DESIGN_ENTRY : text(file, 'Page', 256);
+    if (!/\.html?$/i.test(page) || page.includes('..')) throw new Error('That page is not valid.');
+    await designs.reveal(clean);
+    const base = await designPreviewBase();
+    await shell.openExternal(`${base}/${clean}/${page}`);
+  });
+  define('design:comments', async (_event, slug) => designs.comments(text(slug, 'Design', 64)));
+  define('design:comment-add', async (_event, slug, comment) => {
+    const value = (comment ?? {}) as Record<string, unknown>;
+    return designs.addComment(text(slug, 'Design', 64), {
+      page: typeof value.page === 'string' ? text(value.page, 'Page', 256) : '',
+      selector: typeof value.selector === 'string' ? text(value.selector, 'Element', 500) : '',
+      note: text(value.note, 'Note', 2000),
+    });
+  });
+  define('design:comment-resolve', async (_event, slug, id) =>
+    designs.resolveComment(text(slug, 'Design', 64), text(id, 'Comment', 128)));
+  define('design:comment-send', async (_event, slug) => designs.sendComments(text(slug, 'Design', 64)));
+  define('design:export-html', async (_event, slug) => {
+    const clean = text(slug, 'Design', 64);
+    const choice = await dialog.showOpenDialog({
+      title: 'Export design pages', buttonLabel: 'Export here', properties: ['openDirectory', 'createDirectory'],
+    });
+    const folder = choice.filePaths[0];
+    if (choice.canceled || !folder) return null;
+    return designs.exportFolder(clean, join(folder, designTitle(clean)));
+  });
+  define('design:export-pdf', async (_event, slug, file) => {
+    const clean = text(slug, 'Design', 64);
+    const page = file === undefined || file === null ? undefined : text(file, 'Page', 256);
+    const url = await designs.previewURL(clean, page);
+    if (!url) throw new Error('The preview server is not ready yet.');
+    const choice = await dialog.showSaveDialog({
+      title: 'Export page as PDF', defaultPath: join(app.getPath('documents'), `${designTitle(clean)}.pdf`),
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (choice.canceled || !choice.filePath) return null;
+    const printer = new BrowserWindow({ show: false, width: 1440, height: 1000, webPreferences: { sandbox: true, contextIsolation: true } });
+    try {
+      await printer.loadURL(url);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      const pdf = await printer.webContents.printToPDF({ printBackground: true, pageSize: 'A4' });
+      await writeFile(choice.filePath, pdf);
+      return choice.filePath;
+    } finally {
+      printer.destroy();
+    }
+  });
   define('design:forSession', async (_event, id) => designs.slugForSession(text(id, 'Task', 256)));
   define('design:delete', async (_event, slug) => designs.remove(text(slug, 'Design', 64)));
   define('motion:view', async () => motions.view());
@@ -865,6 +977,8 @@ async function boot(): Promise<void> {
   await automation.load();
   engineRoot = join(root, 'engine');
   engine = new Engine(engineRoot, engineBinary(), emit, browserHooks());
+  knowledge = new KnowledgeStore(join(root, 'knowledge'));
+  engine.setKnowledgeIndex(() => loadKnowledgeIndex(knowledge.directory));
   engine.hideSessions(store.preferences.hiddenSessions);
   engine.keepEngineConfig(await terminalEnabled());
   engine.setAutoCompact(store.preferences.context.autoCompact, store.preferences.context.compactThreshold);
@@ -915,8 +1029,11 @@ async function boot(): Promise<void> {
       const model = store.preferences.defaultModel;
       return { model, auto: !model, autoSettings: store.preferences.auto };
     },
+    models: () => needEngine().listModels(),
+    previewBase: () => designPreviewBase(),
     access: () => store.preferences.defaultAccess,
     emit: (projectId, view) => emit({ type: 'design', workspaceId: projectId, view }),
+    filesChanged: (projectId, slug, stamp) => emit({ type: 'design-files', workspaceId: projectId, slug, stamp }),
     sessionsChanged: () => emit({ type: 'sessions-changed' }),
     show: (sessionId) => {
       engine.showSessions([sessionId]);

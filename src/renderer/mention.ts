@@ -2,7 +2,7 @@
 // these functions only parse the typed token and filter the menu sources so the
 // behavior stays unit-testable.
 
-export type MentionKind = 'file' | 'skill' | 'plugin' | 'agent' | 'connector' | 'atlas';
+export type MentionKind = 'file' | 'skill' | 'plugin' | 'agent' | 'connector' | 'atlas' | 'knowledge';
 
 export interface MentionSource {
   kind: MentionKind;
@@ -54,4 +54,11 @@ export function atlasMention(query: string): MentionSource | undefined {
   const needle = query.trim().toLowerCase();
   if (!needle || !'atlas'.startsWith(needle)) return undefined;
   return { kind: 'atlas', id: 'atlas', name: 'Atlas', detail: 'Project knowledge — pages and module cards' };
+}
+
+/** The @knowledge row opens the app-wide library picker, like @atlas does for the wiki. */
+export function knowledgeMention(query: string): MentionSource | undefined {
+  const needle = query.trim().toLowerCase();
+  if (!needle || !'knowledge'.startsWith(needle)) return undefined;
+  return { kind: 'knowledge', id: 'knowledge', name: 'Knowledge', detail: 'Saved sources for every task — notes, files, and links' };
 }

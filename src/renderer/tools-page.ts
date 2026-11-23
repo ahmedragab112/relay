@@ -10,7 +10,7 @@ import { showSkillPreview } from './skill-install';
 import { externalURL } from './state';
 import { searchTasksAndProjects } from './toolkit-search';
 
-export type ToolsMode = 'skills' | 'plugins' | 'connectors' | 'atlas';
+export type ToolsMode = 'skills' | 'plugins' | 'connectors' | 'atlas' | 'knowledge';
 
 export interface ToolsPageOptions {
   openTask: (id: string) => void;
@@ -18,9 +18,12 @@ export interface ToolsPageOptions {
   atlasOpen: () => void;
   atlasRefresh: () => void;
   atlasClose: () => void;
+  knowledgeOpen: () => void;
+  knowledgeRefresh: () => void;
+  knowledgeClose: () => void;
 }
 
-const MODES: ToolsMode[] = ['skills', 'plugins', 'connectors', 'atlas'];
+const MODES: ToolsMode[] = ['skills', 'plugins', 'connectors', 'atlas', 'knowledge'];
 
 function capabilitySummary({ commands, skills, agents, mcp, code }: PluginCapabilities): string {
   const parts: string[] = [];
@@ -55,9 +58,11 @@ export class ToolsPage {
     plugins: byId<HTMLButtonElement>('tools-tab-plugins'),
     connectors: byId<HTMLButtonElement>('tools-tab-connectors'),
     atlas: byId<HTMLButtonElement>('tools-tab-atlas'),
+    knowledge: byId<HTMLButtonElement>('tools-tab-knowledge'),
   };
   private toolbar = byId('tools-toolbar');
   private atlasPanel = byId('atlas-panel');
+  private knowledgePanel = byId('knowledge-panel');
   private mode: ToolsMode = 'skills';
   private open = false;
   private busy = false;
@@ -93,7 +98,11 @@ export class ToolsPage {
     this.primary.addEventListener('click', () => this.openAdd());
     this.secondary.addEventListener('click', () => void this.installRemaining());
     this.fromFile.addEventListener('click', () => void this.installZip());
-    byId('tools-refresh').addEventListener('click', () => { if (this.mode === 'atlas') this.options.atlasRefresh(); else void this.reload(); });
+    byId('tools-refresh').addEventListener('click', () => {
+      if (this.mode === 'atlas') this.options.atlasRefresh();
+      else if (this.mode === 'knowledge') this.options.knowledgeRefresh();
+      else void this.reload();
+    });
     byId('tools-close').addEventListener('click', () => this.close());
   }
 
@@ -115,7 +124,7 @@ export class ToolsPage {
     this.render();
     this.refreshContent();
     this.syncStatusPolling();
-    if (mode !== 'atlas') this.search.focus();
+    if (!this.sidePanel) this.search.focus();
   }
 
   close(): void {
@@ -124,11 +133,15 @@ export class ToolsPage {
     this.generation++;
     this.page.hidden = true;
     this.atlasPanel.hidden = true;
+    this.knowledgePanel.hidden = true;
     this.options.atlasClose();
+    this.options.knowledgeClose();
     byId('app').classList.remove('tools-open');
     this.syncStatusPolling();
     this.pressed();
   }
+
+  private get sidePanel(): boolean { return this.mode === 'atlas' || this.mode === 'knowledge'; }
 
   private selectTab(mode: ToolsMode): void {
     if (this.mode === mode) return;
@@ -139,20 +152,23 @@ export class ToolsPage {
     this.render();
     this.refreshContent();
     this.syncStatusPolling();
-    if (mode !== 'atlas') this.search.focus();
+    if (!this.sidePanel) this.search.focus();
   }
 
   private paintPanels(): void {
     const atlas = this.mode === 'atlas';
-    this.toolbar.hidden = atlas;
-    this.body.hidden = atlas;
+    const panel = this.sidePanel;
+    this.toolbar.hidden = panel;
+    this.body.hidden = panel;
     this.atlasPanel.hidden = !atlas;
-    this.fromFile.hidden = atlas || this.mode !== 'plugins';
-    byId('tools-refresh').setAttribute('title', atlas ? 'Refresh Atlas' : 'Refresh list');
+    this.knowledgePanel.hidden = this.mode !== 'knowledge';
+    this.fromFile.hidden = panel || this.mode !== 'plugins';
+    byId('tools-refresh').setAttribute('title', atlas ? 'Refresh Atlas' : this.mode === 'knowledge' ? 'Refresh Knowledge' : 'Refresh list');
   }
 
   private refreshContent(): void {
     if (this.mode === 'atlas') this.options.atlasOpen();
+    else if (this.mode === 'knowledge') this.options.knowledgeOpen();
     else void this.reload();
   }
 
@@ -183,7 +199,7 @@ export class ToolsPage {
   }
 
   async reload(): Promise<void> {
-    if (!this.open || this.mode === 'atlas') return;
+    if (!this.open || this.sidePanel) return;
     const token = ++this.generation;
     try {
       const [skills, library, catalog, plugins, connectors, connectorsCatalog, connectorStatuses, sessions, state] = await Promise.all([
@@ -223,11 +239,13 @@ export class ToolsPage {
   }
 
   private paintChrome(): void {
-    this.title.textContent = this.mode === 'atlas' ? 'Atlas' : 'Toolkit';
+    this.title.textContent = this.mode === 'atlas' ? 'Atlas' : this.mode === 'knowledge' ? 'Knowledge' : 'Toolkit';
     this.search.placeholder = 'Search tasks, projects, skills, plugins, and connectors';
     this.summary.textContent = this.mode === 'atlas'
       ? 'Project knowledge, written by the agent and kept inside this project.'
-      : this.mode === 'skills'
+      : this.mode === 'knowledge'
+        ? 'Saved sources, shared by every task in every folder.'
+        : this.mode === 'skills'
         ? `${this.skills.length} skills bundled with Relay · ${this.library.length} installed`
         : this.mode === 'plugins'
           ? `${this.catalog.length} plugin packs bundled with Relay · ${this.plugins.length} installed`
@@ -237,7 +255,7 @@ export class ToolsPage {
   }
 
   private paintChips(labels: string[]): void {
-    if (this.mode === 'atlas') { this.chips.replaceChildren(); return; }
+    if (this.sidePanel) { this.chips.replaceChildren(); return; }
     this.chips.replaceChildren(...labels.map((label) => {
       const chip = button(label, () => { this.filter = label; this.render(); }, 'extension-chip');
       chip.type = 'button';
@@ -259,7 +277,7 @@ export class ToolsPage {
   }
 
   private paintActions(): void {
-    if (this.mode === 'atlas') { this.primary.hidden = true; this.secondary.hidden = true; return; }
+    if (this.sidePanel) { this.primary.hidden = true; this.secondary.hidden = true; return; }
     this.primary.hidden = false;
     this.primary.disabled = this.busy;
     this.primary.textContent = this.mode === 'skills' ? 'Add skill' : this.mode === 'plugins' ? 'Add plugin' : 'Add connector';
@@ -334,7 +352,7 @@ export class ToolsPage {
   }
 
   private render(): void {
-    if (this.mode === 'atlas') return;
+    if (this.sidePanel) return;
     const items = this.discoveryItems();
     const layout = discoveryLayout(items, this.filter, this.query, this.connectorExtras());
     this.paintChips(layout.chips);

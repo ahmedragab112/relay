@@ -764,7 +764,11 @@ console.log('Task search opened the match and flashed its reply');
 
 console.log('Attaching a workspace skill to the message from the composer');
 await page.click('#attach-file');
-await page.locator('#plus-menu .plus-option', { hasText: 'Add skill' }).click();
+assert.ok(await page.locator('#plus-menu .plus-icon').count() >= 10, 'the shortcut menu lost its icons');
+assert.ok(await page.locator('#plus-menu .plus-chevron').count() >= 4, 'the shortcut menu lost its picker rows');
+assert.equal(await page.locator('#plus-menu .plus-divider').count(), 2, 'the shortcut menu is missing its separators');
+await page.screenshot({ path: join(artifacts, 'shortcut-menu.png') });
+await page.locator('#plus-menu .plus-option', { hasText: 'Skills' }).click();
 await waitFor(() => document.querySelector('dialog[aria-label="Skills"]') !== null, 20_000);
 const skillPicker = page.locator('dialog[aria-label="Skills"]');
 await waitFor(() => !/Loading skills/.test(document.querySelector('dialog[aria-label="Skills"]')?.textContent ?? ''), 20_000);
@@ -1173,6 +1177,13 @@ await waitFor(() => document.querySelector('#review-card')?.hidden === false, 60
 });
 assert.match(await text('#review-card .review-title'), /Edited 1 file/);
 assert.match(await text('#review-card .review-row'), /README\.md/);
+console.log('Hovering an edited file shows its patch');
+await page.locator('#review-card .review-row').first().hover();
+await waitFor(() => document.querySelectorAll('.review-hover .patch-line.added').length > 0, 10_000);
+assert.match(await text('.review-hover'), /Edited by the agent for the review card/);
+await page.screenshot({ path: join(artifacts, 'review-hover.png') });
+await page.mouse.move(5, 5);
+await waitFor(() => document.querySelector('.review-hover') === null, 10_000);
 await page.locator('#review-card .review-row').first().click();
 await waitFor(() => document.querySelectorAll('#review-card .review-diff .patch-line.added').length > 0, 10_000);
 assert.ok(await page.locator('#review-card .review-diff .patch-line.removed').count() > 0, 'the inline preview showed no removed lines');

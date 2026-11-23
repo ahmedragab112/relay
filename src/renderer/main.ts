@@ -21,10 +21,10 @@ import { TerminalView } from './terminal';
 import { showSettings, closeSettings } from './settings';
 import { showAutomation, closeAutomation } from './automation';
 import { AtlasPanel, type AtlasTarget } from './atlas-page';
+import { KnowledgePanel } from './knowledge-page';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
 import { showSearch, showTaskSearch } from './search';
-import { ScopeChip } from './scope-chip';
 import { ReviewCard } from './review';
 import { UsageMeter } from './usage';
 import { homeGame } from './home-game';
@@ -94,7 +94,6 @@ const sessions = new Sessions(selectSession, openFolder, () => reviewReload.requ
       motion.consume(await window.relay.motionDelete(motionSlug));
     },
   });
-const scope = new ScopeChip(id => switchScope(id), () => switchScope('choose'));
 const branchBar = new BranchBar(id => sessions.open(id));
 const attention = new AttentionView({ openTask: id => sessions.open(id) });
 const design = new DesignPage({ openTask: id => sessions.open(id), deleted: () => sessionsReload.request() });
@@ -110,6 +109,12 @@ const tools = new ToolsPage({
   },
   atlasRefresh: () => { void atlas.reload(true); },
   atlasClose: () => atlas.hide(),
+  knowledgeOpen: () => knowledge.open(),
+  knowledgeRefresh: () => { void knowledge.reload(); },
+  knowledgeClose: () => knowledge.hide(),
+});
+const knowledge = new KnowledgePanel({
+  attach: (label, text) => composer.addContext(label, text),
 });
 const atlas = new AtlasPanel({
   openFile: (path, line) => { closeOverlayPages(); showInspector(); inspector.openPath(path, line); },
@@ -126,7 +131,7 @@ const atlas = new AtlasPanel({
 const queue = new QueueView(message => composer.restoreQueued(message));
 const review = new ReviewCard(() => { showInspector(); inspector.reviewSession(); }, () => inspector.follow('edit'));
 const usage = new UsageMeter(() => { messagesReload.request(); changesReload.request(); reviewReload.request(); });
-const messagesReload = coalescedReload(async () => { await chat.reload(); syncScope(); }, error => report('Conversation refresh failed', error), 90);
+const messagesReload = coalescedReload(async () => { await chat.reload(); }, error => report('Conversation refresh failed', error), 90);
 const queueReload = coalescedReload(() => queue.reload(), error => report('Queued messages refresh failed', error), 120);
 const sessionsReload = coalescedReload(() => sessions.reload(), error => report('Task refresh failed', error), 400);
 const sessionsRefresh = coalescedReload(() => sessions.reload(), error => report('Task refresh failed', error), 1_500);
@@ -143,14 +148,6 @@ function appearance(): void {
   const light = state.preferences.theme === 'light' || (state.preferences.theme === 'system' && !systemTheme.matches);
   document.documentElement.dataset.theme = light ? 'light' : 'dark';
   editorTheme(light); terminal.theme();
-}
-
-function syncScope(): void {
-  scope.sync({
-    workspace: state?.workspace,
-    workspaces: state?.workspaces ?? [],
-    locked: Boolean(selectedId) && (chat.count() > 0 || selectedSession?.status === 'running'),
-  });
 }
 
 function engine(status: EngineStatus): void {
@@ -230,7 +227,6 @@ function apply(next: AppState): void {
       void refreshSkills(); void refreshCommands();
     }
   }
-  syncScope();
 }
 
 function homeExtras(): { suggestions?: Array<{ label: string; action: () => void }>; game?: HTMLElement } {
@@ -273,7 +269,7 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
       { label: 'Open project', action: openProject }, { label: 'Configure model', action: settings },
     ]);
   } else if (state.workspace.id === SCRATCH_WORKSPACE_ID) {
-    chat.empty('What should we work on?', 'No folder needed — describe the goal and Relay works in a shared space. Attach a project anytime from the folder chip below.', [
+    chat.empty('What should we work on?', 'No folder needed — describe the goal and Relay works in a shared space. Switch projects from the sidebar anytime.', [
       { label: 'New task', action: newTask }, { label: 'Configure model', action: settings },
     ], homeExtras());
   } else {
@@ -281,7 +277,6 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
       { label: 'New task', action: newTask }, { label: 'Configure model', action: settings },
     ], homeExtras());
   }
-  syncScope();
 }
 
 async function refreshModels(): Promise<void> {
@@ -318,7 +313,7 @@ async function refreshCommands(): Promise<void> {
 }
 
 // Only one overlay page may be visible at a time (settings/automation/toolkit/attention stack).
-const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.hide(); tools.close(); attention.close(); design.close(); motion.close(); };
+const closeOverlayPages = (): void => { closeSettings(); closeAutomation(); atlas.hide(); knowledge.hide(); tools.close(); attention.close(); design.close(); motion.close(); };
 
 async function toggleTheme(): Promise<void> {
   if (!state) return;
@@ -381,31 +376,6 @@ async function openFolder(workspaceId: string): Promise<boolean> {
 }
 
 async function openProject(): Promise<void> { await changeWorkspace(() => window.relay.openWorkspace()); }
-
-/** Moves the folder of a task that was just started; an empty task follows the new folder. */
-async function switchScope(target: string): Promise<void> {
-  if (changingWorkspace) return;
-  if (target !== 'choose' && state?.workspace?.id === target) return;
-  const moving = selectedSession && selectedSession.status !== 'running' && chat.count() === 0 ? selectedSession : undefined;
-  const before = state?.workspace?.id;
-  if (moving) composer.preserve();
-  const switched = await changeWorkspace(target === 'choose' ? () => window.relay.openWorkspace() : () => window.relay.switchWorkspace(target));
-  if (!switched) { if (moving) composer.cancelPreserved(); return; }
-  const next = state?.workspace;
-  if (!moving || !next) return;
-  if (next.id === before) { composer.cancelPreserved(); return; }
-  try {
-    await window.relay.moveSession(moving.id, next.id);
-    await sessions.resume(moving.id);
-  } catch (error) {
-    try {
-      await window.relay.deleteSession(moving.id);
-      await sessions.create(next.id);
-      if (sessions.active) composer.carry(moving.id);
-    } catch (fallback) { report('The task could not move to that folder', error instanceof Error ? error : fallback); return; }
-  }
-  composer.focus();
-}
 
 function workspacePicker(): void {
   if (!state?.workspaces.length) { void openProject().catch(error => report('Could not open project', error)); return; }
@@ -548,7 +518,7 @@ function palette(): void {
       { label: 'Open in-app browser', action: () => { showInspector(); inspector.openBrowser(); } },
       { label: 'Open terminal', action: () => terminal.open() },
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
-      { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') },
+      { label: 'Toolkit — skills', action: () => openTools('skills') }, { label: 'Commands', action: () => composer.pickCommands() }, { label: 'Toolkit — plugins', action: () => openTools('plugins') }, { label: 'Toolkit — connectors', action: () => openTools('connectors') }, { label: 'Toolkit — knowledge', action: () => openTools('knowledge') },
       { label: 'Scheduled automation', action: openAutomation },
       { label: 'Atlas — project knowledge', action: () => { void openAtlas(); } },
       { label: 'Attention — agent requests', action: () => { closeOverlayPages(); attention.show(); } },
@@ -584,6 +554,7 @@ function event(event: AppEvent): void {
   if (changingWorkspace) return;
   requests.event(event);
   if (event.type === 'design') { if (event.workspaceId === state?.workspace?.id) design.consume(event.view); }
+  else if (event.type === 'design-files') { if (event.workspaceId === state?.workspace?.id) design.filesChanged(event.slug, event.stamp); }
   else if (event.type === 'motion') { if (event.workspaceId === state?.workspace?.id) motion.consume(event.view); }
   else if (event.type === 'motion-export') {
     if (event.workspaceId !== state?.workspace?.id) return;
@@ -603,6 +574,7 @@ function event(event: AppEvent): void {
     try { host = new URL(event.url).host; } catch { /* keep the raw address */ }
     notify(`Automation “${event.jobName}” opened ${host} in the editor.`);
   } else if (event.type === 'session-stream') {
+    design.stream(event.sessionId, event);
     if (event.sessionId === selectedId) { chat.stream(event); inspector.beginTurn(); }
   } else if (event.type === 'session-changed') {
     if (event.sessionId === selectedId) {
@@ -710,16 +682,19 @@ function attachOpenFile(): void {
 
 bind('attach-files', () => composer.pickAttachments());
 wirePlusMenu(byId<HTMLButtonElement>('attach-file'), byId('plus-menu'), () => [
-  { label: 'Attach files…', run: () => composer.pickAttachments() },
-  { label: 'Attach open file', hint: 'Editor', run: attachOpenFile },
-  { label: 'Add skill', hint: '✦', run: () => composer.pickSkills() },
-  { label: 'Tools & agents', hint: '⛭', run: () => composer.pickAgents() },
-  { label: 'Task context', hint: '↩', run: () => composer.pickContext() },
-  { label: 'Atlas knowledge', hint: '/knowledge', run: () => composer.pickKnowledge() },
-  { label: 'Plan only', hint: '◇', run: () => composer.togglePlanOnly() },
-  { label: 'Run a command', hint: '/', run: () => composer.pickCommands() },
-  { label: 'Open terminal', hint: '>_', run: () => terminal.open() },
-  { label: 'Settings', hint: key('Mod+,'), run: settings },
+  { label: 'Attach files…', icon: 'attach', run: () => composer.pickAttachments() },
+  { label: 'Attach open file', hint: 'Editor', icon: 'file', run: attachOpenFile },
+  { label: 'Atlas knowledge', hint: '/knowledge', icon: 'book', run: () => composer.pickKnowledge() },
+  { label: 'Knowledge library', hint: '@knowledge', icon: 'book', run: () => composer.pickLibrary() },
+  { label: 'Task context', hint: '↩', icon: 'layers', run: () => composer.pickContext() },
+  { label: 'Plan only', icon: 'plan', divider: true, run: () => composer.togglePlanOnly() },
+  { label: 'Skills', icon: 'spark', chevron: true, run: () => composer.pickSkills() },
+  { label: 'Plugins', icon: 'grid', chevron: true, run: () => openTools('plugins') },
+  { label: 'Tools & agents', hint: '⛭', icon: 'robot', run: () => composer.pickAgents() },
+  { label: 'Task history', icon: 'clock', chevron: true, run: searchTasks },
+  { label: 'Run a command', icon: 'slash', chevron: true, run: () => composer.pickCommands() },
+  { label: 'Open terminal', icon: 'terminal', divider: true, run: () => terminal.open() },
+  { label: 'Settings', hint: key('Mod+,'), icon: 'sliders', run: settings },
 ]);
 function dismissNotice(): void {
   const notice = byId('notice');
