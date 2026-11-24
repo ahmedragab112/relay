@@ -1,7 +1,7 @@
 import { _electron as electron } from 'playwright';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -97,6 +97,7 @@ const preview = createServer((request, response) => {
 await new Promise((resolve) => preview.listen(0, '127.0.0.1', resolve));
 const previewURL = `http://127.0.0.1:${preview.address().port}`;
 const pluginZip = join(artifacts, 'relay-e2e-kit.zip');
+const diagnosticsFile = join(artifacts, 'diagnostics.txt');
 await writeFile(pluginZip, zipSync({
   'relay-plugin.json': strToU8(JSON.stringify({ id: 'e2e-kit', name: 'E2E kit', version: '1.0.0', description: 'Desktop fixture plugin' })),
   'commands/check.md': strToU8('---\ndescription: Check the workspace\n---\nCheck the workspace and report findings.\n'),
@@ -120,7 +121,7 @@ async function launch() {
   page = await app.firstWindow();
   page.on('pageerror', (error) => errors.push(`pageerror: ${error.message}`));
   page.on('console', (message) => { if (message.type() === 'error') errors.push(`console: ${message.text()}`); });
-  await app.evaluate(({ dialog }, { pluginZip }) => {
+  await app.evaluate(({ dialog }, { pluginZip, diagnosticsFile }) => {
     dialog.showMessageBox = async (...args) => {
       const options = (args.length > 1 ? args[1] : args[0]) ?? {};
       return { response: options.title === 'Open a terminal?' || options.title === 'Enable MCP server?' ? 1 : 0, checkboxChecked: false };
@@ -130,7 +131,12 @@ async function launch() {
       if (options.title === 'Choose a Relay plugin') return { canceled: false, filePaths: [pluginZip] };
       return { canceled: true, filePaths: [] };
     };
-  }, { pluginZip });
+    dialog.showSaveDialog = async (...args) => {
+      const options = (args.length > 1 ? args[1] : args[0]) ?? {};
+      if (options.title === 'Save Relay diagnostics') return { canceled: false, filePath: diagnosticsFile };
+      return { canceled: true };
+    };
+  }, { pluginZip, diagnosticsFile });
   await page.waitForSelector('#engine-status');
   return page;
 }
@@ -180,12 +186,30 @@ assert.match(await text('#conversation'), /What should we work on\?/);
 assert.equal(await page.evaluate(() => typeof window.require), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.process), 'undefined');
 assert.equal(await page.evaluate(() => typeof window.relay), 'object');
+console.log('Walking the welcome tour');
+await page.waitForSelector('dialog.welcome-tour', { state: 'visible' });
+assert.match(await text('dialog.welcome-tour'), /Start with a task/);
+await page.locator('dialog.welcome-tour').getByRole('button', { name: 'Next' }).click();
+await waitFor(() => /Watch every step/.test(document.querySelector('dialog.welcome-tour')?.textContent ?? ''));
+await page.locator('dialog.welcome-tour').getByRole('button', { name: 'Next' }).click();
+await waitFor(() => /Make it yours/.test(document.querySelector('dialog.welcome-tour')?.textContent ?? ''));
+await page.locator('dialog.welcome-tour').getByRole('button', { name: 'Finish' }).click();
+await page.waitForSelector('dialog.welcome-tour', { state: 'detached' });
 await page.screenshot({ path: join(artifacts, 'onboarding.png') });
 await app.close();
 
 console.log('Seeding a workspace in isolated app data');
 const settingsDir = join(data, 'relay', 'settings');
 await mkdir(settingsDir, { recursive: true });
+let tourSaved = false;
+for (let attempt = 0; attempt < 40 && !tourSaved; attempt += 1) {
+  try {
+    const fresh = JSON.parse(await readFile(join(settingsDir, 'settings.json'), 'utf8'));
+    tourSaved = fresh.preferences?.general?.onboardingComplete === true;
+  } catch { /* the first write has not landed yet */ }
+  if (!tourSaved) await new Promise(resolve => setTimeout(resolve, 100));
+}
+assert.equal(tourSaved, true, 'finishing the welcome tour did not persist onboardingComplete');
 await writeFile(join(settingsDir, 'settings.json'), JSON.stringify({
   version: 1,
   preferences: { theme: 'dark', activeWorkspaceId: workspaceId(projectPath), dictation: { provider: 'custom', model: 'whisper-1' } },
@@ -751,13 +775,13 @@ assert.equal(await page.locator('#tools-button').getAttribute('aria-pressed'), '
 
 console.log('Searching every task and message from the keyboard');
 await page.keyboard.press(`${mod}+Shift+f`);
-await waitFor(() => document.querySelector('dialog[aria-label="Search tasks"]') !== null, 10_000);
-const taskSearch = page.locator('dialog[aria-label="Search tasks"]');
+await waitFor(() => document.querySelector('dialog[aria-label="Search everything"]') !== null, 10_000);
+const taskSearch = page.locator('dialog[aria-label="Search everything"]');
 await taskSearch.locator('input').fill('README describes the test project');
-await page.waitForFunction(() => [...document.querySelectorAll('dialog[aria-label="Search tasks"] .search-result .search-line')].some(node => node.textContent?.includes('README describes the test project')), undefined, { timeout: 30_000 });
+await page.waitForFunction(() => [...document.querySelectorAll('dialog[aria-label="Search everything"] .search-result .search-line')].some(node => node.textContent?.includes('README describes the test project')), undefined, { timeout: 30_000 });
 await page.screenshot({ path: join(artifacts, 'task-search.png') });
 await taskSearch.locator('.search-result').filter({ has: page.locator('.search-line') }).filter({ hasText: 'README describes the test project' }).first().click();
-await waitFor(() => document.querySelector('dialog[aria-label="Search tasks"]') === null, 10_000);
+await waitFor(() => document.querySelector('dialog[aria-label="Search everything"]') === null, 10_000);
 await page.waitForFunction(() => [...document.querySelectorAll('#conversation article')].some(node => node.classList.contains('flash')), undefined, { timeout: 20_000 });
 assert.match(await text('#conversation'), /The README describes the test project\./);
 console.log('Task search opened the match and flashed its reply');
@@ -1092,6 +1116,15 @@ await waitFor(() => document.querySelector('dialog[aria-label="Search tasks and 
 assert.match(await text('dialog[aria-label="Search tasks and commands"]'), /New task/);
 assert.match(await text('dialog[aria-label="Search tasks and commands"]'), /Open terminal/);
 await page.keyboard.press('Escape');
+console.log('Searching everything from the palette');
+await page.click('#palette-button');
+await waitFor(() => document.querySelector('dialog[aria-label="Search tasks and commands"]') !== null);
+await page.locator('dialog[aria-label="Search tasks and commands"] .palette-option', { hasText: 'Search everything…' }).click();
+await waitFor(() => document.querySelector('dialog[aria-label="Search everything"]') !== null);
+await page.fill('dialog[aria-label="Search everything"] input[type="search"]', 'Hello from the test model');
+await waitFor(() => document.querySelectorAll('dialog[aria-label="Search everything"] .search-result').length > 0, 30_000);
+await page.keyboard.press('Escape');
+await waitFor(() => document.querySelector('dialog[aria-label="Search everything"]') === null, 5_000);
 await page.click('#settings-button');
 await waitFor(() => document.querySelector('.settings-page')?.hidden === false);
 const settings = page.locator('.settings-page');
@@ -1115,6 +1148,34 @@ await waitFor(() => document.documentElement.dataset.theme === 'light');
 await page.screenshot({ path: join(artifacts, 'light.png') });
 await settings.getByRole('tab', { name: 'Context & usage' }).click();
 assert.match(await settings.locator('.settings-pane').textContent(), /Auto-compact long conversations/);
+assert.match(await settings.locator('.settings-pane').textContent(), /Task budget/);
+const budgetRow = settings.locator('label.settings-toggle').filter({ hasText: 'Limit task spend' });
+await budgetRow.locator('input[type="checkbox"]').click();
+await waitFor(() => {
+  const input = [...document.querySelectorAll('.settings-pane input[type="number"]')].find(node => node.closest('label')?.textContent?.includes('Stop a task at'));
+  return input instanceof HTMLInputElement && !input.disabled;
+});
+await budgetRow.locator('input[type="checkbox"]').click();
+await waitFor(() => {
+  const input = [...document.querySelectorAll('.settings-pane input[type="number"]')].find(node => node.closest('label')?.textContent?.includes('Stop a task at'));
+  return input instanceof HTMLInputElement && input.disabled;
+});
+await settings.getByRole('tab', { name: 'About Relay' }).click();
+await settings.getByRole('button', { name: 'Save diagnostics…' }).click();
+const reportStart = Date.now();
+let diagnosticsReport = '';
+while (Date.now() - reportStart < 10_000) {
+  try { diagnosticsReport = await readFile(diagnosticsFile, 'utf8'); break; }
+  catch { await new Promise((resolve) => setTimeout(resolve, 150)); }
+}
+assert.match(diagnosticsReport, /^Relay diagnostics/, 'the diagnostics report was never written');
+assert.match(diagnosticsReport, /App\s+\d+\.\d+\.\d+ · darwin /);
+assert.match(diagnosticsReport, /Engine\s+(ready|starting|stopped|error)/);
+assert.match(diagnosticsReport, /Settings\n/);
+assert.match(diagnosticsReport, /task budget off/);
+assert.ok(diagnosticsReport.includes(projectPath), 'the report did not list the open workspace');
+assert.match(diagnosticsReport, /Provider keys, credentials and conversation text are not included/);
+assert.equal((await stat(diagnosticsFile)).mode & 0o777, 0o600, 'the report should be readable by its owner only');
 await settings.locator('button[aria-label="Close settings"]').click();
 
 console.log('Toggling the theme from the sidebar footer');

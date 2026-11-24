@@ -231,6 +231,65 @@ test('general and context preferences merge partial updates', async t => {
   assert.equal(restored.preferences.context.autoCompact, true);
 });
 
+test('task budget preferences default off and validate a sane dollar limit', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.context.costLimitEnabled, false);
+  assert.equal(store.preferences.context.costLimitUsd, 5);
+  await assert.rejects(() => store.savePreferences({ context: { costLimitUsd: 0 } }), /budget/i);
+  await assert.rejects(() => store.savePreferences({ context: { costLimitUsd: 1000.01 } }), /budget/i);
+  await assert.rejects(() => store.savePreferences({ context: { costLimitUsd: 1.234 } }), /budget/i);
+  await assert.rejects(() => store.savePreferences({ context: { costLimitUsd: Number.NaN } }), /budget/i);
+  await assert.rejects(() => store.savePreferences({ context: { costLimitEnabled: 'yes' as never } }), /budget/i);
+  await store.savePreferences({ context: { costLimitEnabled: true, costLimitUsd: 2.5 } });
+  const restored = new SettingsStore(root, codec);
+  await restored.load();
+  assert.equal(restored.preferences.context.costLimitEnabled, true);
+  assert.equal(restored.preferences.context.costLimitUsd, 2.5);
+});
+
+test('a malformed stored budget falls back to the safe default', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'settings.json'), JSON.stringify({
+    version: 1,
+    preferences: { theme: 'dark', context: { costLimitEnabled: 'yes', costLimitUsd: -12 } },
+    workspaces: [], providers: [], mcp: [],
+  }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.context.costLimitEnabled, false);
+  assert.equal(store.preferences.context.costLimitUsd, 5);
+});
+
+test('the welcome tour runs once for a fresh install', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.general.onboardingComplete, false);
+  await store.savePreferences({ general: { onboardingComplete: true } });
+  const restored = new SettingsStore(root, codec);
+  await restored.load();
+  assert.equal(restored.preferences.general.onboardingComplete, true);
+});
+
+test('settings saved before the tour existed skip it instead of showing it again', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(join(root, 'settings.json'), JSON.stringify({
+    version: 1,
+    preferences: { theme: 'light', general: { showThinking: false } },
+    workspaces: [], providers: [], mcp: [],
+  }));
+  const store = new SettingsStore(root, codec);
+  await store.load();
+  assert.equal(store.preferences.general.onboardingComplete, true);
+  assert.equal(store.preferences.general.showThinking, false);
+});
+
 test('the skill registry URL must be a credential-free HTTPS address', async t => {
   const root = await mkdtemp(join(tmpdir(), 'relay-settings-'));
   t.after(() => rm(root, { recursive: true, force: true }));

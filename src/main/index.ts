@@ -35,6 +35,8 @@ import { HistoryIndex } from './history.js';
 import { AtlasRunner } from './atlas.js';
 import { KnowledgeStore } from './knowledge.js';
 import { loadKnowledgeIndex } from './knowledge-index.js';
+import { buildDiagnostics, diagnosticsFileName } from './diagnostics.js';
+import { combineSearchHits } from '../shared/search.js';
 import { designSessionIds, Designs } from './design.js';
 import { DESIGN_ENTRY, designTitle } from '../shared/design.js';
 import { Motions } from './motion.js';
@@ -416,6 +418,31 @@ function register(): void {
     if (!history.size) await history.refresh();
     return history.search(clean);
   });
+  define('search:all', async (_event, query) => {
+    const clean = text(query, 'Search text', 200);
+    if (!history.size) await history.refresh();
+    return combineSearchHits(history.search(clean), await knowledge.search(clean));
+  });
+  define('diagnostics:save', async () => {
+    const generatedAt = new Date();
+    const report = buildDiagnostics({
+      version: app.getVersion(), platform: process.platform, arch: process.arch, home: app.getPath('home'), generatedAt,
+      engine: engine.status,
+      workspaces: store.workspaces.map(({ name, path }) => ({ name, path })),
+      providers: store.publicProviders(),
+      mcp: store.mcp,
+      knowledge: { entries: (await knowledge.list()).length },
+      preferences: store.preferences,
+    });
+    const choice = await dialog.showSaveDialog({
+      title: 'Save Relay diagnostics',
+      defaultPath: join(app.getPath('documents'), diagnosticsFileName(generatedAt)),
+      filters: [{ name: 'Text', extensions: ['txt'] }],
+    });
+    if (choice.canceled || !choice.filePath) return { saved: false };
+    await writeFile(choice.filePath, report, { mode: 0o600 });
+    return { saved: true, path: choice.filePath };
+  });
   define('sessions:react', async (_event, id, messageId, reaction) => {
     if (reaction !== null && reaction !== 'like' && reaction !== 'dislike') throw new Error('Choose like or dislike.');
     await store.setReaction(identifier(id), text(messageId, 'Message', 256), reaction);
@@ -547,6 +574,7 @@ function register(): void {
     await store.savePreferences(values as PreferencesPatch);
     const context = store.preferences.context;
     engine.setAutoCompact(context.autoCompact, context.compactThreshold);
+    engine.setCostLimit(context.costLimitEnabled, context.costLimitUsd);
     engine.setOutputCap(outputCapPreference());
     updates?.setAutoCheck(store.preferences.general.autoUpdate);
     return state();
@@ -982,6 +1010,7 @@ async function boot(): Promise<void> {
   engine.hideSessions(store.preferences.hiddenSessions);
   engine.keepEngineConfig(await terminalEnabled());
   engine.setAutoCompact(store.preferences.context.autoCompact, store.preferences.context.compactThreshold);
+  engine.setCostLimit(store.preferences.context.costLimitEnabled, store.preferences.context.costLimitUsd);
   plugins = new PluginManager(join(engineRoot, 'plugins'));
   await plugins.cleanup();
   skillLibrary = new SkillLibrary(join(engineRoot, 'skills'));

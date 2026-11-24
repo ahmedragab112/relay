@@ -42,7 +42,10 @@ export class KnowledgePanel {
     });
   }
 
-  open(): void { void this.reload(); }
+  open(sourceId?: string): void {
+    if (sourceId) this.selected = sourceId;
+    void this.reload();
+  }
 
   hide(): void { this.request++; }
 

@@ -1,11 +1,19 @@
 {
   "name": "relay-workspace",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "A local-first coding agent workspace",
-  "author": "Relay",
-  "homepage": "https://example.com/relay",
+  "license": "MIT",
+  "author": "Ahmed Ragab",
+  "homepage": "https://github.com/ahmedragab112/relay",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ahmedragab112/relay.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ahmedragab112/relay/issues"
+  },
   "desktopName": "relay.desktop",
   "main": "dist/main/index.cjs",
   "scripts": {

@@ -30,6 +30,9 @@ const MAX_ATTACHMENT_BYTES = 2 * 1024 * 1024;
 // headersTimeout), so any long poll gets a fresh request well before that cutoff.
 const IDLE_WAIT_SLICE_MS = 4 * 60 * 1000;
 
+// Totalling a session's messages is too costly to repeat on every streamed update.
+const BUDGET_CHECK_MS = 5_000;
+
 // These arrive many times per second and never change the persisted transcript on their own.
 const LIVE_ONLY = new Set(['session.tool.progress', 'session.tool.input.delta', 'session.step.streamed']);
 
@@ -342,6 +345,8 @@ export class Engine {
   private outputCap?: OutputCap;
   private outputCapKey = '';
   private outputCaps: ModelOutputCap[] = [];
+  private costLimit?: { enabled: boolean; usd: number };
+  private budgetChecked = new Map<string, number>();
   private configWrites: Promise<void> = Promise.resolve();
 
   constructor(private readonly root: string, private readonly cli: string, private readonly emit: (event: AppEvent) => void, private readonly browser?: EngineBrowserHooks) {}
@@ -355,6 +360,7 @@ export class Engine {
     this.outputCaps = [];
     this.configWrites = Promise.resolve();
     this.freshSessions.clear();
+    this.budgetChecked.clear();
     this.workspaces = [...new Set(workspaces.filter((path) => path && path !== directory))];
     await this.loadLimits();
     this.status = { state: 'starting', detail: 'Starting local engine' };
@@ -557,6 +563,10 @@ export class Engine {
       void this.maybeCompact(data.sessionID);
     }
     if (event.type === 'session.execution.failed' && typeof data.sessionID === 'string') { void this.autoRestart(String(data.sessionID), executionErrorMessage(data)); return; }
+    if (event.type === 'message.updated') {
+      if ((data.info as { role?: unknown } | undefined)?.role === 'assistant' && typeof data.sessionID === 'string') void this.checkBudget(data.sessionID);
+      return;
+    }
     if (event.type.startsWith('session.') && typeof data.sessionID === 'string') {
       // Token and tool-progress events are live decorations; the conversation snapshot updates when steps settle.
       if (LIVE_ONLY.has(event.type)) return;
@@ -743,6 +753,28 @@ export class Engine {
 
   setAutoCompact(enabled: boolean, threshold: number): void {
     this.autoCompact = { enabled, threshold };
+  }
+
+  setCostLimit(enabled: boolean, usd: number): void {
+    this.costLimit = enabled && usd > 0 ? { enabled, usd } : undefined;
+    this.budgetChecked.clear();
+  }
+
+  // Checked while a step settles; a runaway task is stopped before the next one starts.
+  private async checkBudget(sessionID: string): Promise<void> {
+    const limit = this.costLimit;
+    if (!limit || this.silentSessions.has(sessionID)) return;
+    const now = Date.now();
+    if (now - (this.budgetChecked.get(sessionID) ?? 0) < BUDGET_CHECK_MS) return;
+    this.budgetChecked.set(sessionID, now);
+    try {
+      const messages = await collectMessages((input) => this.client.message.list(input), sessionID);
+      const cost = summarizeUsage(messages).cost;
+      if (cost < limit.usd) return;
+      this.budgetChecked.delete(sessionID);
+      this.emit({ type: 'budget-reached', sessionId: sessionID, cost, limit: limit.usd });
+      await this.abortSession(sessionID);
+    } catch {}
   }
 
   /** The terminal launcher starts the engine itself, so it needs the generated config to outlive the app. */

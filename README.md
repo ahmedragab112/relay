@@ -133,10 +133,16 @@ npm run package:win    # NSIS + portable, x64
 ```
 
 macOS builds are signed with your Developer ID when one is configured (hardened
-runtime, JIT entitlements); notarization runs when `APPLE_ID`,
-`APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID` are set. Without them builds
-are ad-hoc signed and Gatekeeper will warn — the artifacts above are unsigned
-until you supply your own signing identities.
+runtime, JIT entitlements), and notarization runs automatically when credentials
+are present — either `NOTARY_KEYCHAIN_PROFILE` (a `notarytool` keychain profile)
+or `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`. Set
+`RELAY_REQUIRE_NOTARIZATION=1` to make a missing or failing notarization step
+fail the build instead of being skipped.
+
+A publicly trusted, notarized build needs an Apple Developer Program membership,
+which is what issues the Developer ID certificate. The artifacts in this
+repository were built without one, so they are ad-hoc signed and Gatekeeper will
+warn — open them with right-click → Open, or build from source.
 
 ## Drive it from a shell
 
@@ -200,4 +206,4 @@ where available.
   "remember this everywhere" requests there.
 - **Design tasks are tasks.** Each design is an ordinary `Design · <Name>` session,
   so folder grouping, attention, and history keep working.
-- **License.** No license file yet — all rights reserved until one is added.
+- **License.** [MIT](LICENSE) — use it, modify it, ship it; keep the copyright notice.

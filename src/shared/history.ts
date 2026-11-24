@@ -22,6 +22,7 @@ export interface HistoryHit {
   role?: ChatMessage['role'];
   snippet: string;
   updatedAt: number;
+  score: number;
 }
 
 const TEXT_LIMIT = 4000;
@@ -74,6 +75,7 @@ export function searchHistory(entries: HistoryEntry[], query: string, limit = 30
           role: message.role,
           snippet: historySnippet(message.text, needle),
           updatedAt: entry.updatedAt,
+          score: titleMatch ? 3 : 1,
         },
       });
     }
@@ -86,6 +88,7 @@ export function searchHistory(entries: HistoryEntry[], query: string, limit = 30
           ...(entry.directory ? { directory: entry.directory } : {}),
           snippet: entry.title,
           updatedAt: entry.updatedAt,
+          score: 2,
         },
       });
     }

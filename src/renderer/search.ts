@@ -1,9 +1,16 @@
-import type { HistoryHit, SearchMode } from '../shared/contracts';
+import type { SearchHit } from '../shared/contracts';
+import type { HistoryHit } from '../shared/history';
 import { el, errorText } from './dom';
 import { dialog } from './dialog';
 
-function wireNavigation(input: HTMLInputElement, results: HTMLElement): void {
+export interface SearchOpeners {
+  task: (hit: HistoryHit) => void;
+  knowledge: (id: string) => void;
+}
+
+function wireNavigation(input: HTMLInputElement, results: HTMLElement, close: () => void): void {
   input.addEventListener('keydown', event => {
+    if (event.key === 'Escape') { event.preventDefault(); close(); return; }
     if (event.key === 'ArrowDown') { event.preventDefault(); results.querySelector('button')?.focus(); }
     if (event.key === 'Enter') { event.preventDefault(); results.querySelector('button')?.click(); }
   });
@@ -17,7 +24,7 @@ function wireNavigation(input: HTMLInputElement, results: HTMLElement): void {
   });
 }
 
-export function showSearch(mode: SearchMode, open: (path: string, line?: number) => void): void {
+export function showSearch(mode: 'files' | 'content', open: (path: string, line?: number) => void): void {
   const modal = dialog(mode === 'files' ? 'Go to file' : 'Search in files');
   const input = el('input', 'palette-input');
   input.type = 'search';
@@ -60,18 +67,37 @@ export function showSearch(mode: SearchMode, open: (path: string, line?: number)
     window.clearTimeout(timer);
     timer = window.setTimeout(() => void run(), 160);
   });
-  wireNavigation(input, results);
+  wireNavigation(input, results, () => modal.root.close());
   modal.add(input, status, results);
   void run();
   input.focus();
 }
 
-export function showTaskSearch(open: (hit: HistoryHit) => void): void {
-  const modal = dialog('Search tasks');
+function resultRow(result: SearchHit, open: SearchOpeners, close: () => void): HTMLButtonElement {
+  const item = el('button', 'palette-option search-result');
+  item.type = 'button';
+  const copy = el('span', 'search-copy');
+  if (result.source === 'task') {
+    const hit = result.task;
+    copy.append(el('span', 'search-path', hit.title));
+    if (hit.messageId) copy.append(el('span', 'search-line', hit.snippet));
+    item.append(copy, el('span', 'pill', hit.role === 'user' ? 'You' : hit.role === 'assistant' ? 'Relay' : 'Task'));
+    item.addEventListener('click', () => { close(); open.task(hit); });
+  } else {
+    const hit = result.knowledge;
+    copy.append(el('span', 'search-path', hit.title), el('span', 'search-line', hit.snippet));
+    item.append(copy, el('span', 'pill', 'Knowledge'));
+    item.addEventListener('click', () => { close(); open.knowledge(hit.id); });
+  }
+  return item;
+}
+
+export function showEverythingSearch(open: SearchOpeners): void {
+  const modal = dialog('Search everything');
   const input = el('input', 'palette-input');
   input.type = 'search';
   input.autocomplete = 'off';
-  input.placeholder = 'Search every task and message…';
+  input.placeholder = 'Search tasks, messages, and Knowledge…';
   input.setAttribute('aria-label', input.placeholder);
   const status = el('p', 'small muted');
   const results = el('div', 'palette-results search-results');
@@ -82,25 +108,15 @@ export function showTaskSearch(open: (hit: HistoryHit) => void): void {
     const current = ++request;
     if (!query) {
       results.replaceChildren();
-      status.textContent = 'Type to search task titles and conversation text across every project.';
+      status.textContent = 'Type to search task titles, conversation text, and saved Knowledge across every project.';
       return;
     }
     status.textContent = 'Searching…';
     try {
-      const found = await window.relay.searchHistory(query);
+      const found = await window.relay.searchAll(query);
       if (current !== request) return;
       status.textContent = found.length ? `${found.length}${found.length >= 30 ? '+' : ''} result${found.length === 1 ? '' : 's'}` : 'No matches';
-      results.replaceChildren(...found.map(hit => {
-        const item = el('button', 'palette-option search-result');
-        item.type = 'button';
-        const copy = el('span', 'search-copy');
-        copy.append(el('span', 'search-path', hit.title));
-        if (hit.messageId) copy.append(el('span', 'search-line', hit.snippet));
-        item.append(copy);
-        item.append(el('span', 'pill', hit.role === 'user' ? 'You' : hit.role === 'assistant' ? 'Relay' : 'Task'));
-        item.addEventListener('click', () => { modal.root.close(); open(hit); });
-        return item;
-      }));
+      results.replaceChildren(...found.map(result => resultRow(result, open, () => modal.root.close())));
     } catch (error) {
       if (current === request) { results.replaceChildren(); status.textContent = `Search failed: ${errorText(error)}`; }
     }
@@ -109,7 +125,7 @@ export function showTaskSearch(open: (hit: HistoryHit) => void): void {
     window.clearTimeout(timer);
     timer = window.setTimeout(() => void run(), 160);
   });
-  wireNavigation(input, results);
+  wireNavigation(input, results, () => modal.root.close());
   modal.add(input, status, results);
   void run();
   input.focus();

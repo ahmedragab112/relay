@@ -19,12 +19,13 @@ import { ToolsPage, type ToolsMode } from './tools-page';
 import { playChime } from './chime';
 import { TerminalView } from './terminal';
 import { showSettings, closeSettings } from './settings';
+import { showWelcomeTour } from './tour';
 import { showAutomation, closeAutomation } from './automation';
 import { AtlasPanel, type AtlasTarget } from './atlas-page';
 import { KnowledgePanel } from './knowledge-page';
 import { showPalette, type Command } from './palette';
 import { wirePlusMenu } from './plus-menu';
-import { showSearch, showTaskSearch } from './search';
+import { showSearch, showEverythingSearch } from './search';
 import { ReviewCard } from './review';
 import { UsageMeter } from './usage';
 import { homeGame } from './home-game';
@@ -44,6 +45,7 @@ let disposed = false;
 let unsubscribe: (() => void) | undefined;
 let engineRevision = 0;
 let lastEngine: EngineStatus | undefined;
+const budgetPaused = new Map<string, { cost: number; limit: number }>();
 const systemTheme = matchMedia('(prefers-color-scheme: dark)');
 const chat = new ChatView({
   copy: async value => { await window.relay.copyText(value); notify('Copied response.'); },
@@ -99,6 +101,7 @@ const attention = new AttentionView({ openTask: id => sessions.open(id) });
 const design = new DesignPage({ openTask: id => sessions.open(id), deleted: () => sessionsReload.request() });
 const motion = new MotionPage({ openTask: id => sessions.open(id), deleted: () => sessionsReload.request() });
 let pendingAtlasTarget: AtlasTarget | undefined;
+let pendingKnowledgeSource: string | undefined;
 const tools = new ToolsPage({
   openTask: openSession,
   openFolder: id => { void openFolder(id); },
@@ -109,7 +112,11 @@ const tools = new ToolsPage({
   },
   atlasRefresh: () => { void atlas.reload(true); },
   atlasClose: () => atlas.hide(),
-  knowledgeOpen: () => knowledge.open(),
+  knowledgeOpen: () => {
+    const id = pendingKnowledgeSource;
+    pendingKnowledgeSource = undefined;
+    knowledge.open(id);
+  },
   knowledgeRefresh: () => { void knowledge.reload(); },
   knowledgeClose: () => knowledge.hide(),
 });
@@ -256,6 +263,7 @@ function selectSession(session?: SessionSummary, userInitiated = false): void {
   selectedSession = session;
   composer.select(session); requests.select(nextId); inspector.setSession(nextId);
   usage.setSession(nextId); review.setSession(nextId); queue.select(nextId);
+  renderBudgetNotice();
   byId('task-title').textContent = session?.title ?? 'Your workspace';
   byId('task-status').textContent = session ? session.status === 'running' ? 'Running' : session.status === 'error' ? 'Error' : 'Idle' : 'No task selected';
   branchBar.render(sessions.items, session?.id);
@@ -322,12 +330,62 @@ async function toggleTheme(): Promise<void> {
   catch (error) { report('Could not change the theme', error); }
 }
 
-function settings(): void {
+function openSettings(startAt?: 'context'): void {
   if (!state) { notify('App state is not available yet. Use Refresh to retry.', true); return; }
   closeOverlayPages();
   showSettings(() => state!, apply, refreshModels, {
     openToolkit: (mode) => { closeOverlayPages(); tools.show(mode); },
-  });
+  }, startAt);
+}
+
+function settings(): void {
+  openSettings();
+}
+
+function renderBudgetNotice(): void {
+  const notice = byId('budget-notice');
+  const paused = selectedId ? budgetPaused.get(selectedId) : undefined;
+  notice.hidden = !paused;
+  if (!paused) return;
+  byId('budget-notice-text').textContent = `This task reached its $${paused.limit.toFixed(2)} budget after spending $${paused.cost.toFixed(2)}, so Relay stopped it.`;
+}
+
+async function raiseBudget(): Promise<void> {
+  const paused = selectedId ? budgetPaused.get(selectedId) : undefined;
+  if (!selectedId || !paused) return;
+  const next = Math.min(1000, Math.max(1, Math.ceil(paused.cost * 2 * 100) / 100));
+  try {
+    apply(await window.relay.savePreferences({ context: { costLimitEnabled: true, costLimitUsd: next } }));
+    budgetPaused.delete(selectedId);
+    renderBudgetNotice();
+    notify(`Budget raised to $${next.toFixed(2)}. Send a message to continue the task.`);
+  } catch (error) {
+    report('Could not raise the task budget', error);
+  }
+}
+
+function budgetSettings(): void {
+  budgetPaused.delete(selectedId);
+  renderBudgetNotice();
+  openSettings('context');
+}
+
+let tourOffered = false;
+
+function finishTour(): void {
+  if (state?.preferences.general.onboardingComplete) return;
+  void window.relay.savePreferences({ general: { onboardingComplete: true } }).then(apply)
+    .catch(error => report('Could not save the welcome tour', error));
+}
+
+function welcomeTour(): void {
+  tourOffered = true;
+  showWelcomeTour(finishTour);
+}
+
+function offerTour(): void {
+  if (tourOffered || !state || state.preferences.general.onboardingComplete) return;
+  welcomeTour();
 }
 
 async function newTask(): Promise<void> {
@@ -439,11 +497,18 @@ async function openArtifactTask(sessionId: string): Promise<void> {
   }
 }
 
-function searchTasks(): void {
-  showTaskSearch(hit => {
-    if (!sessions.items.some(item => item.id === hit.sessionId)) void sessions.reload().then(() => sessions.open(hit.sessionId));
-    else sessions.open(hit.sessionId);
-    if (hit.messageId) revealMessage(hit.sessionId, hit.messageId);
+function searchEverything(): void {
+  showEverythingSearch({
+    task: hit => {
+      if (!sessions.items.some(item => item.id === hit.sessionId)) void sessions.reload().then(() => sessions.open(hit.sessionId));
+      else sessions.open(hit.sessionId);
+      if (hit.messageId) revealMessage(hit.sessionId, hit.messageId);
+    },
+    knowledge: id => {
+      closeOverlayPages();
+      pendingKnowledgeSource = id;
+      tools.show('knowledge');
+    },
   });
 }
 
@@ -504,6 +569,7 @@ function palette(): void {
   const commands: Command[] = [
     { label: 'Open project…', action: openProject }, { label: 'Switch project', action: workspacePicker },
     { label: 'Settings / Configure model', shortcut: key('Mod+,'), action: settings },
+    { label: 'Welcome tour', action: welcomeTour },
     { label: 'Toggle file inspector', action: toggleInspector },
   ];
   if (state?.workspace) {
@@ -514,7 +580,7 @@ function palette(): void {
       { label: 'Template: Explain this repo', action: () => void composer.sendText('Explain how this repository is structured: the entry points, data flow, and the two or three files that matter most. Keep it short.') },
       { label: 'Go to file…', shortcut: key('Mod+P'), action: () => search('files') },
       { label: 'Search in files…', shortcut: key('Mod+F'), action: () => search('content') },
-      { label: 'Search tasks & messages…', shortcut: key('Mod+Shift+F'), action: searchTasks },
+      { label: 'Search everything…', shortcut: key('Mod+Shift+F'), action: searchEverything },
       { label: 'Open in-app browser', action: () => { showInspector(); inspector.openBrowser(); } },
       { label: 'Open terminal', action: () => terminal.open() },
       { label: 'Save current file', shortcut: key('Mod+S'), action: () => inspector.editor.save() },
@@ -538,10 +604,13 @@ function event(event: AppEvent): void {
     engineRevision++; lastEngine = event.status;
     if (state) state = { ...state, engine: event.status };
     engine(event.status);
-    if (event.status.state === 'ready' && state?.workspace && !changingWorkspace) {
-      sessionsReload.request(); requestsReload.request(); attentionReload.request();
-      void refreshModels().catch(error => report('Could not refresh available models', error));
-      void refreshSkills(); void refreshCommands();
+    if (event.status.state === 'ready' && !changingWorkspace) {
+      if (state?.workspace) {
+        sessionsReload.request(); requestsReload.request(); attentionReload.request();
+        void refreshModels().catch(error => report('Could not refresh available models', error));
+        void refreshSkills(); void refreshCommands();
+      }
+      offerTour();
     }
   } else if (event.type === 'models-changed') {
     refreshModels();
@@ -575,6 +644,7 @@ function event(event: AppEvent): void {
     notify(`Automation “${event.jobName}” opened ${host} in the editor.`);
   } else if (event.type === 'session-stream') {
     design.stream(event.sessionId, event);
+    if (budgetPaused.delete(event.sessionId) && event.sessionId === selectedId) renderBudgetNotice();
     if (event.sessionId === selectedId) { chat.stream(event); inspector.beginTurn(); }
   } else if (event.type === 'session-changed') {
     if (event.sessionId === selectedId) {
@@ -596,6 +666,11 @@ function event(event: AppEvent): void {
     if (visibleActivity()) activityReload.request();
     sessionsReload.request();
   } else if (event.type === 'usage') usage.apply(event.sessionId, event.usage);
+  else if (event.type === 'budget-reached') {
+    budgetPaused.set(event.sessionId, { cost: event.cost, limit: event.limit });
+    if (event.sessionId === selectedId) renderBudgetNotice();
+    else notify('A task was paused because it reached its budget.', true);
+  }
   else if (event.type === 'open-session') { closeOverlayPages(); sessions.open(event.sessionId); }
   else if (event.type === 'sessions-changed') sessionsReload.request();
   else if (event.type === 'atlas') { if (event.workspaceId === state?.workspace?.id) atlas.consume(event.view); }
@@ -611,7 +686,10 @@ async function boot(): Promise<void> {
     const next = await window.relay.getState();
     if (revision !== engineRevision && lastEngine) next.engine = lastEngine;
     apply(next);
-    if (next.workspace && next.engine.state === 'ready') { sessionsReload.request(); requestsReload.request(); attentionReload.request(); void refreshSkills(); void refreshCommands(); }
+    if (next.engine.state === 'ready') {
+      if (next.workspace) { sessionsReload.request(); requestsReload.request(); attentionReload.request(); void refreshSkills(); void refreshCommands(); }
+      offerTour();
+    }
   } catch (error) {
     report('Could not load the app. Refresh to retry; if this persists, relaunch Relay', error);
     byId('engine-status').textContent = 'App unavailable · Could not reach the local engine';
@@ -653,6 +731,8 @@ bind('attention-refresh', () => attention.reload());
 bind('search-button', () => search('files'));
 bind('settings-button', settings);
 bind('configure-model', settings);
+bind('budget-raise', raiseBudget);
+bind('budget-settings', budgetSettings);
 bind('automation-button', openAutomation);
 bind('tools-button', () => openTools('skills'));
 bind('palette-button', palette);
@@ -691,7 +771,7 @@ wirePlusMenu(byId<HTMLButtonElement>('attach-file'), byId('plus-menu'), () => [
   { label: 'Skills', icon: 'spark', chevron: true, run: () => composer.pickSkills() },
   { label: 'Plugins', icon: 'grid', chevron: true, run: () => openTools('plugins') },
   { label: 'Tools & agents', hint: '⛭', icon: 'robot', run: () => composer.pickAgents() },
-  { label: 'Task history', icon: 'clock', chevron: true, run: searchTasks },
+  { label: 'Search everything', icon: 'clock', chevron: true, run: searchEverything },
   { label: 'Run a command', icon: 'slash', chevron: true, run: () => composer.pickCommands() },
   { label: 'Open terminal', icon: 'terminal', divider: true, run: () => terminal.open() },
   { label: 'Settings', hint: key('Mod+,'), icon: 'sliders', run: settings },
@@ -730,7 +810,7 @@ function keydown(event: KeyboardEvent): void {
   if (key === 'k') palette();
   else if (key === 'n') void newTask().catch(error => report('Could not create task', error));
   else if (key === 's') void inspector.editor.save();
-  else if (key === 'f') { if (event.shiftKey) searchTasks(); else search('content'); }
+  else if (key === 'f') { if (event.shiftKey) searchEverything(); else search('content'); }
   else if (key === 'p') search('files');
   else if (key === 'b') toggleSidebar();
   else settings();

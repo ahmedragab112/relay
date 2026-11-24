@@ -8,6 +8,8 @@ export type { UpdatePhase, UpdateStatus, UpdateSignal } from './updates';
 import type { UpdateStatus } from './updates';
 export type { HistoryEntry, HistoryHit, HistoryMessage } from './history';
 import type { HistoryHit } from './history';
+export type { SearchHit } from './search';
+import type { SearchHit } from './search';
 
 export type AgentMode = 'build' | 'plan';
 export type AccessLevel = 'read' | 'ask' | 'auto' | 'full';
@@ -67,12 +69,15 @@ export interface GeneralSettings {
   language: Language;
   layout: Layout;
   accent: Accent;
+  onboardingComplete: boolean;
 }
 
 export interface ContextSettings {
   autoCompact: boolean;
   compactThreshold: number;
   shareProject: boolean;
+  costLimitEnabled: boolean;
+  costLimitUsd: number;
 }
 
 export interface AutoSettings {
@@ -732,6 +737,7 @@ export type AppEvent =
   | { type: 'models-changed' }
   | { type: 'agent-open-page'; url: string }
   | { type: 'auto-switched'; sessionId: string; model: string; detail: string }
+  | { type: 'budget-reached'; sessionId: string; cost: number; limit: number }
   | { type: 'atlas'; workspaceId: string; view: AtlasView }
   | { type: 'design'; workspaceId: string; view: DesignView }
   | { type: 'design-files'; workspaceId: string; slug: string; stamp: number }
@@ -857,6 +863,8 @@ export interface RelayAPI {
   stageAttachment(input: StageAttachmentInput): Promise<StagedAttachment>;
   filePath(file: File): string;
   searchHistory(query: string): Promise<HistoryHit[]>;
+  searchAll(query: string): Promise<SearchHit[]>;
+  saveDiagnostics(): Promise<{ saved: boolean; path?: string }>;
   readFile(path: string): Promise<FileDocument>;
   saveFile(path: string, content: string, revision: string): Promise<FileDocument>;
   savePreferences(values: PreferencesPatch): Promise<AppState>;

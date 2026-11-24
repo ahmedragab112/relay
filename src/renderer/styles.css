@@ -1098,3 +1098,23 @@ button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-vis
 .plus-label{flex:1 1 auto;min-width:0;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .plus-chevron{flex:none;font-size:14px;line-height:1;color:var(--subtle)}
 .plus-divider{height:1px;flex:none;margin:4px 7px;background:var(--soft-line)}
+
+/* Task budget pause */
+.budget-notice{display:flex;align-items:center;gap:9px;margin:0 0 8px;padding:8px 11px;border:1px solid color-mix(in srgb,var(--amber) 42%,var(--line));border-radius:var(--radius-3);background:color-mix(in srgb,var(--amber) 9%,var(--raised));font-size:11px;line-height:1.5;color:var(--muted);animation:rise-in .2s cubic-bezier(.22,.7,.3,1) both}
+.budget-notice[hidden]{display:none}
+.budget-notice-icon{width:16px;height:16px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid color-mix(in srgb,var(--amber) 55%,var(--line));color:var(--amber);font-size:10px;font-weight:700}
+.budget-notice-text{flex:1 1 auto;min-width:0;overflow-wrap:anywhere}
+.budget-notice-actions{display:flex;align-items:center;gap:10px;flex:none}
+.budget-notice .text-button{font-size:11px;white-space:nowrap}
+
+/* Welcome tour */
+.welcome-tour{width:min(480px,calc(100vw - 40px))}
+.welcome-tour .dialog-head h2{font-size:13px;color:var(--muted);font-weight:520}
+.tour-step{min-height:104px}
+.welcome-tour .dialog-body h3.tour-title{font-size:17px;font-weight:590;letter-spacing:-.35px;margin:0 0 9px;color:var(--text)}
+.welcome-tour .dialog-body p.tour-copy{font-size:12.5px;line-height:1.75;margin:0;color:var(--muted)}
+.tour-dots{display:flex;gap:6px;margin-top:18px}
+.tour-dot{width:6px;height:6px;border-radius:50%;background:var(--line);transition:background .15s ease}
+.tour-dot.active{background:var(--blue)}
+.welcome-tour .dialog-actions{margin-top:14px}
+.welcome-tour .tour-skip{margin-right:auto;align-self:center}

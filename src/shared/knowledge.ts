@@ -32,6 +32,16 @@ export interface KnowledgeMeta {
   excerpt: string;
 }
 
+export interface KnowledgeHit {
+  id: string;
+  title: string;
+  kind: KnowledgeKind;
+  origin?: string;
+  snippet: string;
+  updatedAt: number;
+  score: number;
+}
+
 export const isKnowledgeKind = (value: unknown): value is KnowledgeKind =>
   value === 'note' || value === 'file' || value === 'link';
 
@@ -109,6 +119,38 @@ export function knowledgeMeta(source: KnowledgeSource): KnowledgeMeta {
     size: source.text.length,
     excerpt: knowledgeExcerpt(source.text),
   };
+}
+
+function knowledgeSnippet(text: string, query: string): string {
+  const source = text.replace(/\s+/g, ' ').trim();
+  const index = source.toLowerCase().indexOf(query);
+  if (index < 0) return knowledgeExcerpt(source);
+  const start = Math.max(0, index - 60);
+  const end = Math.min(source.length, index + query.length + 80);
+  return `${start > 0 ? '…' : ''}${source.slice(start, end)}${end < source.length ? '…' : ''}`;
+}
+
+export function searchKnowledge(sources: KnowledgeSource[], query: string, limit = 30): KnowledgeHit[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [];
+  const hits: KnowledgeHit[] = [];
+  for (const source of sources) {
+    const titleMatch = source.title.toLowerCase().includes(needle);
+    const bodyMatch = source.text.toLowerCase().includes(needle);
+    if (!titleMatch && !bodyMatch) continue;
+    hits.push({
+      id: source.id,
+      title: source.title,
+      kind: source.kind,
+      ...(source.origin ? { origin: source.origin } : {}),
+      snippet: bodyMatch ? knowledgeSnippet(source.text, needle) : source.title,
+      updatedAt: source.updatedAt,
+      score: titleMatch ? (bodyMatch ? 3 : 2) : 1,
+    });
+  }
+  return hits
+    .sort((left, right) => right.score - left.score || right.updatedAt - left.updatedAt)
+    .slice(0, limit);
 }
 
 /** Validates a saved library file; entries that cannot be used are dropped, never thrown on. */

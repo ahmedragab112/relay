@@ -3,8 +3,8 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/p
 import { basename, join } from 'node:path';
 import {
   KNOWLEDGE_LIBRARY_FILE, KNOWLEDGE_NOTE_LIMIT, KNOWLEDGE_TEXT_LIMIT, KNOWLEDGE_TITLE_LIMIT,
-  htmlTitle, htmlToText, knowledgeMeta, knowledgeTitle, normalizeKnowledgeText, parseKnowledgeLibrary,
-  type KnowledgeMeta, type KnowledgeSource,
+  htmlTitle, htmlToText, knowledgeMeta, knowledgeTitle, normalizeKnowledgeText, parseKnowledgeLibrary, searchKnowledge,
+  type KnowledgeHit, type KnowledgeMeta, type KnowledgeSource,
 } from '../shared/knowledge.js';
 
 const LIBRARY_BYTES = 16 * 1024 * 1024;
@@ -72,6 +72,10 @@ export class KnowledgeStore {
     const source = (await this.load()).find((item) => item.id === id);
     if (!source) throw new Error('That Knowledge source no longer exists.');
     return source.text;
+  }
+
+  async search(query: string, limit = 30): Promise<KnowledgeHit[]> {
+    return searchKnowledge(await this.load(), query, limit);
   }
 
   /** Adds a pasted note; the first line becomes the title when none was given. */

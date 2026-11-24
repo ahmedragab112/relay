@@ -83,6 +83,14 @@
         <div id="agent-chips" class="attachments"></div>
         <div id="context-chips" class="attachments"></div>
         <div id="skill-suggestions" class="skill-suggestions" aria-live="polite"></div>
+        <div id="budget-notice" class="budget-notice" role="status" hidden>
+          <span class="budget-notice-icon" aria-hidden="true">!</span>
+          <span id="budget-notice-text" class="budget-notice-text"></span>
+          <span class="budget-notice-actions">
+            <button type="button" id="budget-raise" class="text-button">Raise limit</button>
+            <button type="button" id="budget-settings" class="text-button">Budget settings</button>
+          </span>
+        </div>
         <form id="composer" class="composer">
           <div id="attachments" class="attachments file-cards" aria-label="Attachments"></div>
           <textarea id="prompt" rows="3" aria-label="Message the agent" data-i18n-placeholder="composer.placeholder" placeholder="Describe what you’d like to build…" disabled></textarea>

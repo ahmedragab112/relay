@@ -44,9 +44,10 @@ export const generalDefaults: GeneralSettings = {
   language: 'en',
   layout: 'tabs',
   accent: 'blue',
+  onboardingComplete: false,
 };
 
-export const contextDefaults: ContextSettings = { autoCompact: false, compactThreshold: 80, shareProject: true };
+export const contextDefaults: ContextSettings = { autoCompact: false, compactThreshold: 80, shareProject: true, costLimitEnabled: false, costLimitUsd: 5 };
 export const autoDefaults: AutoSettings = { includeFree: true, includeEngineHosted: false, maxTokens: 4096, modelIds: [] };
 
 const flag = (value: unknown, fallback: boolean): boolean => typeof value === 'boolean' ? value : fallback;
@@ -81,6 +82,15 @@ function compactThreshold(value: unknown): number {
   return threshold;
 }
 
+function costLimit(value: unknown): number {
+  if (value === undefined) return contextDefaults.costLimitUsd;
+  const limit = Number(value);
+  if (!Number.isFinite(limit) || limit < 0.01 || limit > 1000 || Math.abs(Math.round(limit * 100) - limit * 100) > 1e-9) {
+    throw new Error('Choose a task budget between $0.01 and $1000, with at most two decimals.');
+  }
+  return limit;
+}
+
 function sanitizeGeneral(value: unknown): GeneralSettings {
   const raw = (value && typeof value === 'object' ? value : {}) as Partial<GeneralSettings>;
   let directory = '';
@@ -106,6 +116,7 @@ function sanitizeGeneral(value: unknown): GeneralSettings {
     language: raw.language === 'ar' ? 'ar' : 'en',
     layout: raw.layout === 'inbox' || raw.layout === 'focus' ? raw.layout : 'tabs',
     accent: ['emerald', 'amber', 'rose', 'violet', 'cyan'].includes(raw.accent as string) ? raw.accent as Accent : 'blue',
+    onboardingComplete: flag(raw.onboardingComplete, generalDefaults.onboardingComplete),
   };
 }
 
@@ -113,10 +124,14 @@ function sanitizeContext(value: unknown): ContextSettings {
   const raw = (value && typeof value === 'object' ? value : {}) as Partial<ContextSettings>;
   let threshold = contextDefaults.compactThreshold;
   try { threshold = compactThreshold(raw.compactThreshold); } catch { threshold = contextDefaults.compactThreshold; }
+  let limit = contextDefaults.costLimitUsd;
+  try { limit = costLimit(raw.costLimitUsd); } catch { limit = contextDefaults.costLimitUsd; }
   return {
     autoCompact: flag(raw.autoCompact, contextDefaults.autoCompact),
     compactThreshold: threshold,
     shareProject: flag(raw.shareProject, contextDefaults.shareProject),
+    costLimitEnabled: flag(raw.costLimitEnabled, contextDefaults.costLimitEnabled),
+    costLimitUsd: limit,
   };
 }
 
@@ -307,6 +322,9 @@ export class SettingsStore {
         throw new Error('Relay settings are invalid. Your settings file has not been overwritten.');
       }
       this.data = sanitizeSettings(data);
+      const general = data.preferences.general as Partial<GeneralSettings> | undefined;
+      // Settings written before the tour existed belong to someone already using Relay.
+      if (!general || typeof general !== 'object' || general.onboardingComplete === undefined) this.data.preferences.general.onboardingComplete = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
@@ -410,7 +428,7 @@ export class SettingsStore {
   private mergeGeneral(patch: Partial<GeneralSettings>, current: GeneralSettings): GeneralSettings {
     if (!patch || typeof patch !== 'object') throw new Error('Invalid general settings.');
     const next = { ...current };
-    const booleans = ['inputWhileRunning', 'slashCommandDisplay', 'skipUnansweredQuestions', 'promptSuggestions', 'showThinking', 'goalDriven', 'homeGame', 'skillSuggestions', 'turnNotifications', 'turnSound', 'requestNotifications'] as const;
+    const booleans = ['inputWhileRunning', 'slashCommandDisplay', 'skipUnansweredQuestions', 'promptSuggestions', 'showThinking', 'goalDriven', 'homeGame', 'skillSuggestions', 'turnNotifications', 'turnSound', 'requestNotifications', 'onboardingComplete'] as const;
     for (const key of booleans) {
       const value = patch[key];
       if (value === undefined) continue;
@@ -450,6 +468,11 @@ export class SettingsStore {
       next.shareProject = patch.shareProject;
     }
     if (patch.compactThreshold !== undefined) next.compactThreshold = compactThreshold(patch.compactThreshold);
+    if (patch.costLimitEnabled !== undefined) {
+      if (typeof patch.costLimitEnabled !== 'boolean') throw new Error('The task budget must be on or off.');
+      next.costLimitEnabled = patch.costLimitEnabled;
+    }
+    if (patch.costLimitUsd !== undefined) next.costLimitUsd = costLimit(patch.costLimitUsd);
     return next;
   }
 

@@ -10,7 +10,7 @@ import { resetLabel } from '../shared/limits';
 import { catalogIconElement, connectorIcon, pluginIcon, skillIcon } from './catalog-icons';
 
 const groupLabel: Record<string, string> = { free: 'Free', local: 'Local', paid: 'Paid', custom: 'Custom' };
-type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'extensions' | 'archive' | 'about';
+export type Category = 'general' | 'appearance' | 'context' | 'auto' | 'voice' | 'providers' | 'extensions' | 'archive' | 'about';
 type ExtensionMode = 'plugins' | 'skills' | 'connectors';
 
 export interface SettingsOptions {
@@ -36,7 +36,7 @@ export function closeSettings(): void {
   byId('settings-button').focus();
 }
 
-export function showSettings(getState: () => AppState, apply: (state: AppState) => void, refreshModels: () => Promise<void>, options: SettingsOptions): void {
+export function showSettings(getState: () => AppState, apply: (state: AppState) => void, refreshModels: () => Promise<void>, options: SettingsOptions, startAt?: Category): void {
   const openToolkit = options.openToolkit;
   const page = byId('settings-page');
   if (!settingsWired) {
@@ -61,7 +61,7 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     fail(value: unknown) { error.textContent = errorText(value); },
   };
   const controls = new Map<Category, HTMLButtonElement>();
-  let active: Category = 'general';
+  let active: Category = startAt ?? 'general';
 
   const save = (patch: PreferencesPatch): Promise<AppState> => window.relay.savePreferences(patch);
 
@@ -354,6 +354,45 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
       row,
       el('p', 'settings-note', 'Compaction keeps a summary card in the conversation so you can see what was replaced. Open the usage meter in any task header to compact on demand.'),
     ));
+
+    const limitInput = el('input');
+    limitInput.type = 'number';
+    limitInput.min = '0.01';
+    limitInput.max = '1000';
+    limitInput.step = '0.01';
+    limitInput.value = getState().preferences.context.costLimitUsd.toFixed(2);
+    limitInput.disabled = !getState().preferences.context.costLimitEnabled;
+    const limitRow = el('label', 'settings-toggle');
+    const limitCopy = el('span', 'settings-copy');
+    limitCopy.append(el('strong', '', 'Stop a task at'), el('small', '', 'When a task spends this much, Relay stops it and shows a “Raise limit” notice above the composer. Applies to each running task separately.'));
+    const limitNumber = el('span', 'settings-number');
+    limitNumber.append(el('span', 'settings-suffix', '$'), limitInput);
+    limitRow.append(limitCopy, limitNumber);
+    limitInput.addEventListener('change', () => {
+      limitInput.disabled = true;
+      void save({ context: { costLimitUsd: Number(limitInput.value) } }).then(next => {
+        apply(next);
+        limitInput.value = next.preferences.context.costLimitUsd.toFixed(2);
+      })
+        .catch(error => { limitInput.value = getState().preferences.context.costLimitUsd.toFixed(2); modal.fail(error); })
+        .finally(() => { limitInput.disabled = !getState().preferences.context.costLimitEnabled; });
+    });
+    const budgetRow = el('label', 'settings-toggle');
+    const budgetCopy = el('span', 'settings-copy');
+    budgetCopy.append(el('strong', '', 'Limit task spend'), el('small', '', 'Budget is counted from the cost each model reports for the task, across all of its turns.'));
+    const budgetInput = el('input');
+    budgetInput.type = 'checkbox';
+    budgetInput.checked = getState().preferences.context.costLimitEnabled;
+    budgetInput.addEventListener('change', () => {
+      budgetInput.disabled = true;
+      void save({ context: { costLimitEnabled: budgetInput.checked } }).then(next => {
+        apply(next);
+        limitInput.disabled = !next.preferences.context.costLimitEnabled;
+      }).catch(error => { budgetInput.checked = getState().preferences.context.costLimitEnabled; modal.fail(error); })
+        .finally(() => { budgetInput.disabled = false; });
+    });
+    budgetRow.append(budgetCopy, budgetInput);
+    pane.append(section('Task budget', budgetRow, limitRow));
   };
 
   const auto = (): void => {
@@ -660,7 +699,24 @@ export function showSettings(getState: () => AppState, apply: (state: AppState) 
     row('Platform', `${state.platform} · ${state.arch}`);
     row('Engine', `${state.engine.state}${state.engine.version ? ` · ${state.engine.version}` : ''}`);
     row('Workspace', state.workspace?.name ?? 'No project open');
-    pane.append(section('About Relay', rows, el('p', 'settings-note', 'Relay is a local-first agent workspace. Conversations, settings, and provider keys stay on this Mac; provider requests go through the local OpenCode engine.')));
+    const diagnostics = el('div', 'settings-field-row');
+    const diagnosticsCopy = el('div', 'settings-copy');
+    diagnosticsCopy.append(
+      el('strong', '', 'Diagnostics'),
+      el('small', '', 'Save a report with the app version, engine status, workspaces and settings to share when something goes wrong. Provider keys and secrets are redacted.'),
+    );
+    const diagnosticsActions = el('div', 'settings-inline');
+    diagnosticsActions.append(button('Save diagnostics…', async () => {
+      try {
+        const result = await window.relay.saveDiagnostics();
+        if (result.saved) notify(`Diagnostics saved to ${result.path}`);
+      } catch (error) { report('Could not save diagnostics', error); }
+    }, 'button'));
+    diagnostics.append(diagnosticsCopy, diagnosticsActions);
+    pane.append(
+      section('About Relay', rows, el('p', 'settings-note', 'Relay is a local-first agent workspace. Conversations, settings, and provider keys stay on this Mac; provider requests go through the local OpenCode engine.')),
+      section('Troubleshooting', diagnostics),
+    );
   };
 
   const extensions = (): void => {

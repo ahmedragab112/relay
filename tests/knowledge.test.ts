@@ -7,7 +7,7 @@ import { KnowledgeStore } from '../src/main/knowledge.js';
 import { loadKnowledgeIndex } from '../src/main/knowledge-index.js';
 import {
   formatKnowledgeIndex, htmlTitle, htmlToText, KNOWLEDGE_INDEX_LIMIT, knowledgeExcerpt, knowledgeMeta,
-  parseKnowledgeLibrary, type KnowledgeSource,
+  parseKnowledgeLibrary, searchKnowledge, type KnowledgeSource,
 } from '../src/shared/knowledge.js';
 
 async function library(deps: { fetch?: typeof fetch; now?: () => number } = {}) {
@@ -159,6 +159,38 @@ test('links save readable text, refresh the same URL, and refuse hostile input',
     await assert.rejects(() => store.addLink('not a url'), /full link/);
     await assert.rejects(() => store.addLink('https://missing.test/x'), /HTTP 404/);
     await assert.rejects(() => store.addLink('https://image.test/logo.png'), /not a page/);
+  } finally { await done(); }
+});
+
+test('searchKnowledge ranks titles over bodies, keeps one hit per source, and cuts a snippet around the match', () => {
+  const hits = searchKnowledge([
+    source({ id: 'body', title: 'Unrelated', text: 'The cache is warm.', updatedAt: 30 }),
+    source({ id: 'title', title: 'Cache notes', text: 'Nothing here.', updatedAt: 10 }),
+    source({ id: 'none', title: 'Other', text: 'Unrelated.' }),
+  ], 'cache');
+  assert.deepEqual(hits.map((hit) => hit.id), ['title', 'body']);
+  assert.equal(hits[0].snippet, 'Cache notes');
+  assert.equal(hits[1].snippet, 'The cache is warm.');
+  assert.equal(hits[0].score, 2);
+  assert.equal(hits[1].score, 1);
+});
+
+test('searchKnowledge is blank-safe and respects the limit', () => {
+  assert.deepEqual(searchKnowledge([source()], '   '), []);
+  const many = Array.from({ length: 40 }, (_, index) => source({ id: `s${index}`, title: `Note ${index}`, text: 'alpha', updatedAt: index }));
+  assert.equal(searchKnowledge(many, 'alpha', 12).length, 12);
+});
+
+test('the store searches saved sources without leaving memory', async () => {
+  const { store, done } = await library();
+  try {
+    await store.addNote('Deploy runbook', 'Restart the engine before shipping.');
+    await store.addNote('Design tokens', 'Colors live in theme.css.');
+    const hits = await store.search('engine');
+    assert.equal(hits.length, 1);
+    assert.equal(hits[0].title, 'Deploy runbook');
+    assert.match(hits[0].snippet, /Restart the engine/);
+    assert.deepEqual(await store.search('  '), []);
   } finally { await done(); }
 });
 
